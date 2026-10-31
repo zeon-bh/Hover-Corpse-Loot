@@ -1,0 +1,148 @@
+local Z_DEBUG_LEVEL = 2 -- 0=OFF, 1=ERROR, 2=WARN/STATE, 3=VERBOSE
+local SCRIPT_NAME = "hcl_mcm"
+
+---------------------------------------------------------------------------------------
+-- Outputs formatted chokepoint diagnostic telemetry to the X-Ray console log.
+-- Arguments: level (number) - Severity threshold (1=ERROR, 2=WARN/STATE, 3=VERBOSE)
+--            station (string) - Name of the executing system or function
+--            msg (string) - Format string or message
+--            ... (any) - Optional format arguments passed to string.format
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function z_probe(level, station, msg, ...)
+    if not Z_DEBUG_LEVEL or level > Z_DEBUG_LEVEL then return end
+    local formatted = (select("#", ...) > 0) and string.format(tostring(msg), ...) or tostring(msg)
+    printf("[%s] | %s | %s", SCRIPT_NAME, tostring(station), formatted)
+end
+
+-- [SYSTEM] HoverCorpseLootMCM
+
+local DEFAULTS = {
+    hcl_toggle            = true,
+    hcl_cond              = true,
+    hcl_parts_cond        = true,
+    hcl_parts_repair_type = true,
+    hcl_patches_on_armor  = true,
+    hcl_x_offset          = 150,
+    hcl_y_offset          = 0,
+    hcl_ui_opacity        = 75,
+    hcl_ui_delay          = 200,
+    hcl_max_dist          = 2,
+}
+
+local settings_cache = {}
+
+-- Probe once at script load whether G.A.M.M.A.'s firearm condition text suppression mod is active.
+local gamma_hides_gun_cond = (grok_gun_no_condition_text ~= nil)
+
+---------------------------------------------------------------------------------------
+-- Refreshes the in-memory settings cache from MCM or falls back to default values.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function refresh_settings_cache()
+    for opt_id, def_val in pairs(DEFAULTS) do
+        if ui_mcm then
+            local val = ui_mcm.get("hcl/" .. opt_id)
+            if val ~= nil then
+                settings_cache[opt_id] = val
+            else
+                settings_cache[opt_id] = def_val
+            end
+        else
+            settings_cache[opt_id] = def_val
+        end
+    end
+    z_probe(2, "HoverCorpseLootMCM", "Settings cache refreshed (toggle=%s, x=%s, y=%s, opacity=%s, delay=%s, dist=%s)",
+        tostring(settings_cache.hcl_toggle),
+        tostring(settings_cache.hcl_x_offset),
+        tostring(settings_cache.hcl_y_offset),
+        tostring(settings_cache.hcl_ui_opacity),
+        tostring(settings_cache.hcl_ui_delay),
+        tostring(settings_cache.hcl_max_dist))
+end
+
+---------------------------------------------------------------------------------------
+-- Retrieves the cached value of an HCL MCM setting with fallback to its default.
+-- Arguments: opt_id (string) - Option identifier matching DEFAULTS keys
+-- Returns: (any) - Cached boolean or numeric option value
+---------------------------------------------------------------------------------------
+function get(opt_id)
+    if not opt_id then return nil end
+    local val = settings_cache[opt_id]
+    if val ~= nil then
+        return val
+    end
+    return DEFAULTS[opt_id]
+end
+
+---------------------------------------------------------------------------------------
+-- Indicates whether the active modpack hides condition percentage text on firearms.
+-- Arguments: none
+-- Returns: (boolean) - True if grok_gun_no_condition_text is loaded, false otherwise
+---------------------------------------------------------------------------------------
+function is_gamma_gun_cond_hidden()
+    return gamma_hides_gun_cond
+end
+
+---------------------------------------------------------------------------------------
+-- Determines whether condition percentage text should be shown for a given item object.
+-- Arguments: obj (game_object) - Inventory item object being evaluated
+-- Returns: (boolean) - True if condition percentage text is allowed for this item
+---------------------------------------------------------------------------------------
+function should_show_cond(obj)
+    if not get("hcl_cond") then
+        return false
+    end
+    if gamma_hides_gun_cond and obj and IsWeapon(obj) and (not IsMelee(obj)) then
+        return false
+    end
+    return true
+end
+
+---------------------------------------------------------------------------------------
+-- Callback handler invoked by MCM when the user applies option changes.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function on_option_change()
+    refresh_settings_cache()
+end
+
+---------------------------------------------------------------------------------------
+-- Constructs and returns the Mod Configuration Menu (MCM) option tree for HCL.
+-- Arguments: none
+-- Returns: (table) - MCM menu specification table for menu id 'hcl'
+---------------------------------------------------------------------------------------
+function on_mcm_load()
+    local op = {
+        id = "hcl",
+        sh = true,
+        gr = {
+            { id = "title", type = "slide", link = "ui_options_slider_player", text = "ui_mcm_menu_hcl", size = { 512, 50 }, spacing = 20 },
+            { id = "hcl_toggle", type = "check", val = 1, def = DEFAULTS.hcl_toggle },
+            { id = "divider_icons", type = "line" },
+            { id = "hcl_cond", type = "check", val = 1, def = DEFAULTS.hcl_cond },
+            { id = "hcl_parts_cond", type = "check", val = 1, def = DEFAULTS.hcl_parts_cond },
+            { id = "hcl_parts_repair_type", type = "check", val = 1, def = DEFAULTS.hcl_parts_repair_type },
+            { id = "hcl_patches_on_armor", type = "check", val = 1, def = DEFAULTS.hcl_patches_on_armor },
+            { id = "divider_sliders", type = "line" },
+            { id = "hcl_x_offset", type = "track", val = 2, min = 0, max = 500, step = 5, def = DEFAULTS.hcl_x_offset },
+            { id = "hcl_y_offset", type = "track", val = 2, min = 0, max = 250, step = 5, def = DEFAULTS.hcl_y_offset },
+            { id = "hcl_ui_opacity", type = "track", val = 2, min = 10, max = 100, step = 1, def = DEFAULTS.hcl_ui_opacity },
+            { id = "hcl_ui_delay", type = "track", val = 2, min = 100, max = 500, step = 10, def = DEFAULTS.hcl_ui_delay },
+            { id = "hcl_max_dist", type = "track", val = 2, min = 2, max = 5, step = 0.5, def = DEFAULTS.hcl_max_dist },
+        }
+    }
+    return op
+end
+
+---------------------------------------------------------------------------------------
+-- Initializes the MCM settings cache and registers the option change callback at game start.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function on_game_start()
+    refresh_settings_cache()
+    RegisterScriptCallback("on_option_change", on_option_change)
+end

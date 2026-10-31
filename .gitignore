@@ -1,0 +1,13 @@
+# Mod Organizer 2 Local Metadata
+meta.ini
+
+# Backup & Temporary Files
+*.bak
+*.tmp
+*.orig
+*~
+
+# OS & Editor Metadata
+.DS_Store
+Thumbs.db
+desktop.ini

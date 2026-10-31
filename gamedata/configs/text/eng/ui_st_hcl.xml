@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<string_table>
+    <string id="ui_mcm_menu_hcl">
+        <text>Hover Corpse Loot</text>
+    </string>
+    <string id="ui_mcm_hcl_title">
+        <text>Hover Corpse Loot - UI Options</text>
+    </string>
+    <string id="ui_mcm_hcl_hcl_toggle">
+        <text>Toggle Hover Corpse Loot</text>
+    </string>
+    <string id="ui_mcm_hcl_hcl_cond">
+        <text>Enable/Disable Condition % on Item Icons</text>
+    </string>
+    <string id="ui_mcm_hcl_hcl_cond_desc">
+        <text>Toggles condition percentage text on item icons in the Hover Corpse Loot window. Under G.A.M.M.A., firearm condition percentage remains hidden by design and weapon part dots indicate condition.</text>
+    </string>
+    <string id="ui_mcm_hcl_hcl_parts_cond">
+        <text>Enable/Disable Parts condition dots on Weapons &amp; Armors</text>
+    </string>
+    <string id="ui_mcm_hcl_hcl_parts_repair_type">
+        <text>Enable/Disable Repair type Icons on Weapons &amp; Armors</text>
+    </string>
+    <string id="ui_mcm_hcl_hcl_patches_on_armor">
+        <text>Enable/Disable Faction patch Icons on Armors</text>
+    </string>
+    <string id="ui_mcm_hcl_hcl_x_offset">
+        <text>Hover Corpse Loot UI Horizontal Offset from crosshair (OFFSET : X)</text>
+    </string>
+    <string id="ui_mcm_hcl_hcl_y_offset">
+        <text>Hover Corpse Loot UI Vertical Offset from crosshair (OFFSET : Y)</text>
+    </string>
+    <string id="ui_mcm_hcl_hcl_ui_opacity">
+        <text>Adjust the Opacity of the main Hover UI Window</text>
+    </string>
+    <string id="ui_mcm_hcl_hcl_ui_delay">
+        <text>Adjust the delay for Hover Corpse Loot UI to be displayed on HUD</text>
+    </string>
+    <string id="ui_mcm_hcl_hcl_max_dist">
+        <text>Maximum distance from a stalker body to open the Hover UI Window</text>
+    </string>
+    <string id="st_hcl_claimed">
+        <text>CLAIMED</text>
+    </string>
+    <string id="st_hcl_footer_placeholder">
+        <text>Placeholder Text</text>
+    </string>
+</string_table>

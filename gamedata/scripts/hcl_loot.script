@@ -1,0 +1,1378 @@
+local debug_level = 2 -- 0=OFF, 1=ERROR, 2=WARN/STATE, 3=VERBOSE
+local m_floor = math.floor
+local m_abs = math.abs
+local s_format = string.format
+local s_byte = string.byte
+local t_sort = table.sort
+local t_concat = table.concat
+
+---------------------------------------------------------------------------------------
+-- Outputs formatted chokepoint diagnostic telemetry to the X-Ray console log.
+-- Arguments: level (number) - Severity threshold (1=ERROR, 2=WARN/STATE, 3=VERBOSE)
+--            station (string) - Name of the executing system or function
+--            msg (string) - Format string or message
+--            ... (any) - Optional format arguments passed to string.format
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function z_probe(level, station, msg, ...)
+    if level > debug_level then return end
+    local ok, formatted = pcall(string.format, msg, ...)
+    printf("[Hover Corpse Loot] | %s | %s", tostring(station), ok and formatted or tostring(msg))
+end
+
+-- [SYSTEM] HCL_Loot
+
+local cursor_idx = nil -- { x = col_idx, y = row_idx } (1-based) or nil when IDLE/EMPTY
+local cursor_object = nil
+local cursor_cell_idx = nil
+local alt_modifier = false
+local special_func = nil
+local preferred_visual_col = nil -- Visual column center preserved across vertical ALT+Scroll steps
+
+local grid_rows = {} -- 2D jagged array: grid_rows[y][x] = { cell_idx, item_id, section, area }
+local corpse_objects = {} -- {[item_id] = game_object}
+local corpse_order = {} -- array of item_ids
+local tracked_corpse_id = nil
+local last_inventory_hash = nil
+local transferred_blacklist_ids = {} -- {[item_id] = expire_time_global} guard for async engine transfers
+
+local lmb_held = false
+local rmb_held = false
+local lmb_pressed_dik = nil
+local rmb_pressed_dik = nil
+local lmb_last_down_tg = 0
+local rmb_last_down_tg = 0
+local lmb_alt_latched = false
+local rmb_alt_latched = false
+local lmb_swept_during_hold = false
+local sweep_row_braked = false
+local sweep_active_row_ids = nil -- {[item_id] = true} snapshot of active row items during LMB sweep
+local sweep_brake_tg = 0
+local SWEEP_BRAKE_RELEASE_MS = 250
+local post_loot_block_until_tg = 0
+local POST_LOOT_ADS_BLOCK_MS = 450
+local suppress_first_preview_scroll = false
+
+---------------------------------------------------------------------------------------
+-- Clamps a numeric value between a minimum and maximum bound.
+-- Arguments: val (number) - Input number
+--            min_v (number) - Lower bound
+--            max_v (number) - Upper bound
+-- Returns: (number) - Clamped value
+---------------------------------------------------------------------------------------
+local function clamp_num(val, min_v, max_v)
+    if val < min_v then return min_v end
+    if val > max_v then return max_v end
+    return val
+end
+
+---------------------------------------------------------------------------------------
+-- Records an item ID in the short-lived blacklist so async C++ transfers/releases
+-- are immediately excluded from same-frame UI rebuilds and destroyed-object access.
+-- Arguments: id (number|nil) - Engine object ID to blacklist
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function blacklist_corpse_item_id(id)
+    if not id then return end
+    transferred_blacklist_ids[id] = time_global() + 850
+    corpse_objects[id] = nil
+end
+
+---------------------------------------------------------------------------------------
+-- Checks whether an item ID is currently blacklisted by an in-flight transfer/release.
+-- Arguments: id (number|nil) - Engine object ID
+-- Returns: (boolean) - True if blacklisted
+---------------------------------------------------------------------------------------
+local function is_item_id_blacklisted(id)
+    if not id then return true end
+    local exp = transferred_blacklist_ids[id]
+    if not exp then return false end
+    if time_global() < exp then
+        return true
+    end
+    transferred_blacklist_ids[id] = nil
+    return false
+end
+
+---------------------------------------------------------------------------------------
+-- Checks whether either Left Alt or Right Alt modifier key is currently held.
+-- Arguments: none
+-- Returns: (boolean) - True if LALT or RALT is pressed
+---------------------------------------------------------------------------------------
+local function is_alt_pressed()
+    if ui_mcm and ui_mcm.get_mod_key then
+        if ui_mcm.get_mod_key(3) then
+            return true
+        end
+    end
+    if key_state then
+        local lalt = DIK_keys and DIK_keys.DIK_LMENU or 56
+        local ralt = DIK_keys and DIK_keys.DIK_RMENU or 184
+        if (key_state(lalt) ~= 0) or (key_state(ralt) ~= 0) then
+            return true
+        end
+    end
+    return alt_modifier == true
+end
+
+---------------------------------------------------------------------------------------
+-- Verifies via CInput hardware key_state whether Mouse 1 / Weapon Fire is physically down.
+-- Arguments: none
+-- Returns: (boolean) - True while the physical LMB / Fire key is held down
+---------------------------------------------------------------------------------------
+local function is_lmb_physically_down()
+    if not lmb_held then return false end
+    if key_state then
+        local m1 = DIK_keys and DIK_keys.MOUSE_1 or 337
+        local fire_dik = (bind_to_dik and key_bindings and key_bindings.kWPN_FIRE) and bind_to_dik(key_bindings.kWPN_FIRE) or nil
+        if (key_state(m1) ~= 0)
+            or (fire_dik and fire_dik ~= 0 and key_state(fire_dik) ~= 0)
+            or (lmb_pressed_dik and lmb_pressed_dik ~= 0 and key_state(lmb_pressed_dik) ~= 0) then
+            return true
+        end
+        return false
+    end
+    return lmb_held
+end
+
+---------------------------------------------------------------------------------------
+-- Verifies via CInput hardware key_state whether Mouse 2 / Weapon Zoom is physically down.
+-- Arguments: none
+-- Returns: (boolean) - True while the physical RMB / Zoom key is held down
+---------------------------------------------------------------------------------------
+local function is_rmb_physically_down()
+    if not rmb_held then return false end
+    if key_state then
+        local m2 = DIK_keys and DIK_keys.MOUSE_2 or 338
+        local zoom_dik = (bind_to_dik and key_bindings and key_bindings.kWPN_ZOOM) and bind_to_dik(key_bindings.kWPN_ZOOM) or nil
+        if (key_state(m2) ~= 0)
+            or (zoom_dik and zoom_dik ~= 0 and key_state(zoom_dik) ~= 0)
+            or (rmb_pressed_dik and rmb_pressed_dik ~= 0 and key_state(rmb_pressed_dik) ~= 0) then
+            return true
+        end
+        return false
+    end
+    return rmb_held
+end
+
+---------------------------------------------------------------------------------------
+-- Filters out non-lootable internal NPC items (bolts, PDAs, torches, quest items,
+-- animation dummies, or items currently in-flight for transfer/deletion).
+-- Arguments: item (game_object) - Candidate item in corpse inventory
+-- Returns: (boolean) - True if the item should be displayed and lootable in Hover UI
+---------------------------------------------------------------------------------------
+function is_lootable_corpse_item(item)
+    if not item then return false end
+    local ok_id, id = pcall(function() return item:id() end)
+    if not ok_id or not id or is_item_id_blacklisted(id) then
+        return false
+    end
+    if not level.object_by_id(id) then
+        return false
+    end
+    local ok_sec, sec = pcall(function() return item:section() end)
+    if not ok_sec or not sec or sec == "bolt" or sec == "device_pda" or sec == "device_torch" or sec == "items_anm_dummy" then
+        return false
+    end
+    if SYS_GetParam(1, sec, "quest_item", false) then
+        return false
+    end
+    local gw = SYS_GetParam(2, sec, "inv_grid_width", 0) or 0
+    local gh = SYS_GetParam(2, sec, "inv_grid_height", 0) or 0
+    if gw <= 0 or gh <= 0 then
+        return false
+    end
+    return true
+end
+
+local scan_acc_map = {}
+local scan_acc_count = 0
+local scan_acc_sum_ids = 0
+local scan_acc_xor_mix = 0
+
+---------------------------------------------------------------------------------------
+-- Callback accumulator invoked by iterate_inventory to fingerprint lootable corpse items.
+-- Arguments: owner (game_object) - Corpse inventory owner
+--            item (game_object) - Candidate item inside corpse inventory
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function scan_corpse_iter_cb(owner, item)
+    if is_lootable_corpse_item(item) then
+        local id = item:id()
+        scan_acc_map[id] = item
+        scan_acc_count = scan_acc_count + 1
+        scan_acc_sum_ids = scan_acc_sum_ids + id
+        if bit and bit.bxor then
+            scan_acc_xor_mix = bit.bxor(scan_acc_xor_mix, id * 31 + s_byte(item:section(), 1))
+        end
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Computes a lightweight fingerprint of the online lootable items on a corpse.
+-- Arguments: npc (game_object|nil) - Target dead stalker object
+-- Returns: (string, number, table) - Fingerprint string, item count, and {[id]=obj} map
+---------------------------------------------------------------------------------------
+function scan_corpse_inventory(npc)
+    scan_acc_map = {}
+    scan_acc_count = 0
+    scan_acc_sum_ids = 0
+    scan_acc_xor_mix = 0
+
+    if npc and not npc:alive() then
+        npc:iterate_inventory(scan_corpse_iter_cb, npc)
+    end
+
+    local hash = s_format("%d:%d:%d", scan_acc_count, scan_acc_sum_ids, scan_acc_xor_mix)
+    return hash, scan_acc_count, scan_acc_map
+end
+
+---------------------------------------------------------------------------------------
+-- Comparator function sorting a single row bucket left-to-right by column coordinate.
+-- Arguments: a (table) - First cell metadata entry
+--            b (table) - Second cell metadata entry
+-- Returns: (boolean) - True if entry a precedes entry b horizontally
+---------------------------------------------------------------------------------------
+local function sort_grid_row_entries(a, b)
+    if a.col_x ~= b.col_x then
+        return a.col_x < b.col_x
+    end
+    return a.cell_idx < b.cell_idx
+end
+
+---------------------------------------------------------------------------------------
+-- Synchronizes the 2D row/column navigation matrix from HCL_UI's UICellContainer cells.
+-- Records visual column span (col_start, col_end, col_center) on every cell entry so
+-- vertical ALT+Scroll navigation aligns by visual column rather than array index.
+-- Arguments: container (UICellContainer|nil) - Active cell container from HCL_UI
+--            objects_map (table|nil) - Sparse {[item_id] = game_object} map
+-- Returns: (table) - 2D grid_rows table where grid_rows[y][x] holds cell metadata
+---------------------------------------------------------------------------------------
+function sync_grid_from_container(container, objects_map)
+    local had_items = (#grid_rows > 0)
+    if objects_map then
+        corpse_objects = objects_map
+    end
+    grid_rows = {}
+
+    if container and container.cell then
+        local row_buckets = {}
+        local row_keys = {}
+        for idx, ci in pairs(container.cell) do
+            if type(idx) == "number" and ci and ci.ID and not is_item_id_blacklisted(ci.ID) and ci.area and ci.cell and ci.cell:IsShown() then
+                local ry = ci.area.y or 1
+                local rx = ci.area.x or idx
+                local cw = ci.area.w or (ci.section and SYS_GetParam(2, ci.section, "inv_grid_width", 1)) or 1
+                if not row_buckets[ry] then
+                    row_buckets[ry] = {}
+                    row_keys[#row_keys + 1] = ry
+                end
+                row_buckets[ry][#row_buckets[ry] + 1] = {
+                    cell_idx   = idx,
+                    item_id    = ci.ID,
+                    section    = ci.section,
+                    col_x      = rx,
+                    col_start  = rx,
+                    col_end    = rx + cw,
+                    col_center = rx + (cw * 0.5),
+                    row_y      = ry,
+                }
+            end
+        end
+
+        t_sort(row_keys)
+        for r_i = 1, #row_keys do
+            local bucket = row_buckets[row_keys[r_i]]
+            t_sort(bucket, sort_grid_row_entries)
+            grid_rows[r_i] = bucket
+        end
+    end
+
+    if had_items and #grid_rows == 0 then
+        post_loot_block_until_tg = time_global() + POST_LOOT_ADS_BLOCK_MS
+    end
+    clamp_or_init_cursor()
+    return grid_rows
+end
+
+---------------------------------------------------------------------------------------
+-- Resolves a live online game_object for a given grid cell entry (including stack children).
+-- Uses level.object_by_id to guarantee a destroyed C++ wrapper is never returned.
+-- Arguments: entry (table|nil) - Cell entry from grid_rows[y][x]
+-- Returns: (game_object|nil) - Online item game_object or nil
+---------------------------------------------------------------------------------------
+local function resolve_entry_object(entry)
+    if not entry then return nil end
+    local id = entry.item_id
+    if not id or is_item_id_blacklisted(id) then
+        return nil
+    end
+    local obj = level.object_by_id(id)
+    if obj then
+        corpse_objects[id] = obj
+        return obj
+    end
+    corpse_objects[id] = nil
+    return nil
+end
+
+---------------------------------------------------------------------------------------
+-- Initializes cursor_idx to (1,1) or clamps it to valid bounds when items are removed.
+-- Arguments: none
+-- Returns: (table|nil, game_object|nil) - Updated cursor_idx and cursor_object
+---------------------------------------------------------------------------------------
+function clamp_or_init_cursor()
+    local cb_status = hcl_main and hcl_main.get_callback_status and hcl_main.get_callback_status() or "IDLE"
+    if cb_status ~= "LOOT" or #grid_rows == 0 then
+        cursor_idx = nil
+        cursor_object = nil
+        cursor_cell_idx = nil
+        preferred_visual_col = nil
+        return nil, nil
+    end
+
+    local was_nil = (cursor_idx == nil)
+    if was_nil then
+        cursor_idx = { x = 1, y = 1 }
+    end
+
+    local clamped_y = clamp_num(cursor_idx.y or 1, 1, #grid_rows)
+    local row = grid_rows[clamped_y]
+    if not row or #row == 0 then
+        cursor_idx = nil
+        cursor_object = nil
+        cursor_cell_idx = nil
+        preferred_visual_col = nil
+        return nil, nil
+    end
+
+    local clamped_x = clamp_num(cursor_idx.x or 1, 1, #row)
+    cursor_idx.x = clamped_x
+    cursor_idx.y = clamped_y
+
+    local entry = row[clamped_x]
+    cursor_cell_idx = entry and entry.cell_idx or nil
+    cursor_object = resolve_entry_object(entry)
+    if (was_nil or not preferred_visual_col) and entry and entry.col_center then
+        preferred_visual_col = entry.col_center
+    end
+    return cursor_idx, cursor_object
+end
+
+-- [SYSTEM] HCL_Loot_Scroll
+
+---------------------------------------------------------------------------------------
+-- Snapshots the item IDs currently residing in the active cursor row so Vacuum Sweep
+-- only loots items belonging to that row and brakes deterministically when it empties.
+-- Arguments: none
+-- Returns: (number) - Count of item IDs captured in the row snapshot
+---------------------------------------------------------------------------------------
+local function snapshot_current_row_ids()
+    clamp_or_init_cursor()
+    sweep_active_row_ids = {}
+    if not cursor_idx or #grid_rows == 0 then
+        return 0
+    end
+    local row = grid_rows[cursor_idx.y]
+    if not row then
+        return 0
+    end
+    local count = 0
+    for i = 1, #row do
+        local entry = row[i]
+        if entry and entry.item_id and not is_item_id_blacklisted(entry.item_id) then
+            sweep_active_row_ids[entry.item_id] = true
+            count = count + 1
+        end
+    end
+    return count
+end
+
+---------------------------------------------------------------------------------------
+-- Counts how many items from the snapshotted sweep row still remain in the active grid.
+-- Arguments: none
+-- Returns: (number) - Remaining item count in sweep_active_row_ids
+---------------------------------------------------------------------------------------
+local function count_remaining_sweep_row_items()
+    if not sweep_active_row_ids or #grid_rows == 0 then
+        return 0
+    end
+    local remaining = 0
+    for r = 1, #grid_rows do
+        local row = grid_rows[r]
+        if row then
+            for c = 1, #row do
+                local entry = row[c]
+                if entry and entry.item_id and sweep_active_row_ids[entry.item_id] and not is_item_id_blacklisted(entry.item_id) then
+                    remaining = remaining + 1
+                end
+            end
+        end
+    end
+    return remaining
+end
+
+---------------------------------------------------------------------------------------
+-- Steps cursor_idx by 1 unit along the horizontal row axis (wrapping to adjacent rows)
+-- and updates preferred_visual_col to the newly selected cell's visual column center.
+-- Arguments: dir_sign (number) - -1 for UP/Left, +1 for DOWN/Right
+-- Returns: (boolean) - True if the step wrapped onto a different row
+---------------------------------------------------------------------------------------
+local function step_cursor_horizontal_once(dir_sign)
+    if not cursor_idx or #grid_rows == 0 then return false end
+    local y = clamp_num(cursor_idx.y, 1, #grid_rows)
+    local row = grid_rows[y]
+    local x = clamp_num(cursor_idx.x, 1, #row)
+    local wrapped_row = false
+
+    if dir_sign > 0 then
+        if x < #row then
+            x = x + 1
+        elseif y < #grid_rows then
+            y = y + 1
+            x = 1
+            wrapped_row = true
+        end
+    else
+        if x > 1 then
+            x = x - 1
+        elseif y > 1 then
+            y = y - 1
+            x = #grid_rows[y]
+            wrapped_row = true
+        end
+    end
+
+    cursor_idx.x = x
+    cursor_idx.y = y
+    clamp_or_init_cursor()
+    local new_row = cursor_idx and grid_rows[cursor_idx.y]
+    local new_entry = (new_row and cursor_idx) and new_row[cursor_idx.x]
+    if new_entry and new_entry.col_center then
+        preferred_visual_col = new_entry.col_center
+    end
+    return wrapped_row
+end
+
+---------------------------------------------------------------------------------------
+-- Steps cursor_idx vertically across rows when ALT + Mouse Wheel is scrolled.
+-- Matches the target row item whose horizontal grid span [col_start, col_end] contains
+-- or is closest to preferred_visual_col so vertical scrolling never zig-zags.
+-- Arguments: dir_sign (number) - -1 for UP, +1 for DOWN
+--            steps (number) - Number of row steps to move
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function step_cursor_vertical(dir_sign, steps)
+    if not cursor_idx or #grid_rows == 0 then return end
+    local cur_row = grid_rows[cursor_idx.y]
+    local cur_entry = cur_row and cur_row[cursor_idx.x]
+    if not preferred_visual_col and cur_entry and cur_entry.col_center then
+        preferred_visual_col = cur_entry.col_center
+    end
+    local target_col = preferred_visual_col or (cur_entry and cur_entry.col_center) or 1.5
+
+    local new_y = clamp_num(cursor_idx.y + (dir_sign * steps), 1, #grid_rows)
+    local target_row = grid_rows[new_y]
+    if not target_row or #target_row == 0 then return end
+
+    local best_x = 1
+    local best_span_dist = 999999
+    local best_center_dist = 999999
+
+    for i = 1, #target_row do
+        local e = target_row[i]
+        local c_start = e.col_start or e.col_x or i
+        local c_end = e.col_end or (c_start + 1)
+        local c_center = e.col_center or (c_start + 0.5)
+
+        local span_dist = 0
+        if target_col < c_start then
+            span_dist = c_start - target_col
+        elseif target_col > c_end then
+            span_dist = target_col - c_end
+        end
+        local center_dist = m_abs(c_center - target_col)
+
+        if (span_dist < (best_span_dist - 0.001)) or (m_abs(span_dist - best_span_dist) <= 0.001 and center_dist < best_center_dist) then
+            best_span_dist = span_dist
+            best_center_dist = center_dist
+            best_x = i
+        end
+    end
+
+    cursor_idx.y = new_y
+    cursor_idx.x = best_x
+    clamp_or_init_cursor()
+end
+
+-- [SYSTEM] HCL_Loot_MBC
+
+---------------------------------------------------------------------------------------
+-- Transfers a single item object from the hovered corpse to the player's inventory.
+-- Validates via level.object_by_id and blacklists the item ID immediately so async
+-- C++ transfers/merged ammo cannot trigger [BusyHandsDebug] destroyed-object errors.
+-- Arguments: item_obj (game_object) - Target item inside hovered_corpse
+-- Returns: (boolean) - True if the item was transferred successfully
+---------------------------------------------------------------------------------------
+local function transfer_single_item_to_actor(item_obj)
+    local npc = hcl_main and hcl_main.get_hovered_corpse and hcl_main.get_hovered_corpse() or nil
+    if not npc or npc:alive() or not db.actor or not item_obj then
+        return false
+    end
+    local ok_id, id = pcall(function() return item_obj:id() end)
+    if not ok_id or not id or is_item_id_blacklisted(id) then
+        return false
+    end
+    local live_obj = level.object_by_id(id)
+    if not live_obj then
+        blacklist_corpse_item_id(id)
+        return false
+    end
+    local ok_p, parent = pcall(function() return live_obj:parent() end)
+    if not ok_p or not parent or parent:id() ~= npc:id() then
+        return false
+    end
+    blacklist_corpse_item_id(id)
+    npc:transfer_item(live_obj, db.actor)
+    if hcl_main and hcl_main.mark_corpse_looted then
+        hcl_main.mark_corpse_looted(npc:id())
+    end
+    return true
+end
+
+local loot_all_buffer = {}
+
+---------------------------------------------------------------------------------------
+-- Callback accumulator invoked by iterate_inventory to gather lootable items for Loot All.
+-- Arguments: owner (game_object) - Corpse inventory owner
+--            item (game_object) - Candidate item inside corpse inventory
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function collect_loot_all_cb(owner, item)
+    if is_lootable_corpse_item(item) then
+        loot_all_buffer[#loot_all_buffer + 1] = item
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Transfers all lootable items from the hovered corpse to the player's inventory.
+-- Arguments: none
+-- Returns: (number) - Number of items transferred
+---------------------------------------------------------------------------------------
+local function loot_all_corpse_items()
+    local npc = hcl_main and hcl_main.get_hovered_corpse and hcl_main.get_hovered_corpse() or nil
+    if not npc or npc:alive() or not db.actor then
+        return 0
+    end
+    loot_all_buffer = {}
+    npc:iterate_inventory(collect_loot_all_cb, npc)
+
+    local count = 0
+    local npc_id = npc:id()
+    for i = 1, #loot_all_buffer do
+        local itm = loot_all_buffer[i]
+        local ok_id, id = pcall(function() return itm and itm:id() end)
+        if ok_id and id and not is_item_id_blacklisted(id) then
+            local live_obj = level.object_by_id(id)
+            local ok_p, parent = pcall(function() return live_obj and live_obj:parent() end)
+            if ok_p and parent and parent:id() == npc_id then
+                blacklist_corpse_item_id(id)
+                npc:transfer_item(live_obj, db.actor)
+                count = count + 1
+            end
+        end
+    end
+    if count > 0 and hcl_main and hcl_main.mark_corpse_looted then
+        hcl_main.mark_corpse_looted(npc_id)
+        z_probe(2, "HCL_Loot_MBC", "Looted all (%d) items from corpse ID %d", count, npc_id)
+    end
+    if hcl_ui and hcl_ui.refresh_now then
+        hcl_ui.refresh_now()
+    end
+    return count
+end
+
+---------------------------------------------------------------------------------------
+-- Executes LMB-hold + Scroll Wheel vacuum sweep across the snapshotted row with braking.
+-- Stops immediately once the snapshotted row's items are exhausted until the user pauses
+-- scrolling for SWEEP_BRAKE_RELEASE_MS (250 ms) or releases and re-presses LMB.
+-- Arguments: dir_sign (number) - -1 for UP/Left sweep, +1 for DOWN/Right sweep
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function execute_vacuum_sweep(dir_sign)
+    if not cursor_idx or #grid_rows == 0 then return end
+    lmb_swept_during_hold = true
+    local now_tg = time_global()
+
+    if sweep_row_braked then
+        if (now_tg - sweep_brake_tg) < SWEEP_BRAKE_RELEASE_MS then
+            sweep_brake_tg = now_tg
+            return
+        end
+        sweep_row_braked = false
+        snapshot_current_row_ids()
+    end
+
+    if not sweep_active_row_ids then
+        snapshot_current_row_ids()
+    end
+
+    if count_remaining_sweep_row_items() == 0 then
+        sweep_row_braked = true
+        sweep_brake_tg = now_tg
+        return
+    end
+
+    if dir_sign < 0 and cursor_idx and cursor_idx.x > 1 then
+        local cur_row = grid_rows[cursor_idx.y]
+        local cur_entry = cur_row and cur_row[cursor_idx.x]
+        if not cur_entry or not sweep_active_row_ids[cur_entry.item_id] then
+            cursor_idx.x = cursor_idx.x - 1
+            clamp_or_init_cursor()
+        end
+    end
+
+    local row = cursor_idx and grid_rows[cursor_idx.y] or nil
+    local entry = (row and cursor_idx) and row[cursor_idx.x] or nil
+    if not entry or not entry.item_id or not sweep_active_row_ids[entry.item_id] or not cursor_object then
+        sweep_row_braked = true
+        sweep_brake_tg = now_tg
+        return
+    end
+
+    sweep_active_row_ids[entry.item_id] = nil
+    transfer_single_item_to_actor(cursor_object)
+
+    if dir_sign < 0 and cursor_idx and cursor_idx.x > 1 then
+        cursor_idx.x = cursor_idx.x - 1
+    end
+
+    if hcl_ui and hcl_ui.refresh_now then
+        hcl_ui.refresh_now()
+    end
+
+    local next_row = cursor_idx and grid_rows[cursor_idx.y] or nil
+    local next_entry = (next_row and cursor_idx) and next_row[cursor_idx.x] or nil
+    if count_remaining_sweep_row_items() == 0 or not next_entry or not sweep_active_row_ids[next_entry.item_id] then
+        sweep_row_braked = true
+        sweep_brake_tg = now_tg
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Executes HCL_Loot_Scroll (1 step per wheel notch) or vacuum sweep in LOOT state.
+-- Arguments: dir (number) - Wheel direction (>0 / 1 for UP, <=0 / 0 for DOWN)
+--            alt_held (boolean) - Whether ALT modifier is active
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function handle_loot_scroll(dir, alt_held)
+    clamp_or_init_cursor()
+    if not cursor_idx or #grid_rows == 0 then return end
+
+    local dir_sign = (dir == 1 or dir > 0) and -1 or 1
+
+    if is_lmb_physically_down() and not alt_held then
+        execute_vacuum_sweep(dir_sign)
+        return
+    end
+
+    if alt_held then
+        step_cursor_vertical(dir_sign, 1)
+    else
+        step_cursor_horizontal_once(dir_sign)
+    end
+
+    if hcl_ui and hcl_ui.on_cursor_moved then
+        hcl_ui.on_cursor_moved()
+    end
+end
+
+-- [SYSTEM] HCL_Loot_Special_Function
+
+local orig_create_time_event_ref = nil
+local disassembly_timer_captured = false
+
+---------------------------------------------------------------------------------------
+-- Callback for CreateTimeEvent that triggers a deferred HCL_UI dirty refresh after
+-- asynchronous disassembly parts or cloned weapons come online inside the corpse.
+-- Arguments: none
+-- Returns: (boolean) - Always true to remove the one-shot time event
+---------------------------------------------------------------------------------------
+local function deferred_ui_dirty_refresh_cb()
+    if hcl_ui and hcl_ui.mark_dirty then
+        hcl_ui.mark_dirty()
+    end
+    return true
+end
+
+---------------------------------------------------------------------------------------
+-- Wrapper for CreateTimeEvent that detects when 'delay_disassembly*' is scheduled
+-- while keeping owner_id as the corpse ID so disassembled parts spawn in the corpse.
+-- Arguments: ev_id (any) - Event identifier
+--            act_id (any) - Action identifier
+--            timer_delay (number) - Delay in seconds
+--            func (function) - Timer callback function
+--            owner_id (number|nil) - Original owner ID argument (corpse ID)
+--            ... (any) - Remaining callback arguments
+-- Returns: (any) - Return value of the original CreateTimeEvent
+---------------------------------------------------------------------------------------
+local function redirected_disassembly_time_event(ev_id, act_id, timer_delay, func, owner_id, ...)
+    if tostring(act_id):find("^delay_disassembly") then
+        disassembly_timer_captured = true
+    end
+    return orig_create_time_event_ref(ev_id, act_id, timer_delay, func, owner_id, ...)
+end
+
+---------------------------------------------------------------------------------------
+-- Disassembles cursor_object via item_parts.func_disassembly into the corpse inventory.
+-- Arguments: obj (game_object) - Target item inside corpse inventory
+-- Returns: (boolean) - True if disassembly was invoked
+---------------------------------------------------------------------------------------
+local function execute_disassembly_on_cursor(obj)
+    if not obj or not db.actor or not item_parts or not item_parts.func_disassembly then
+        return false
+    end
+    local ok_id, id = pcall(function() return obj:id() end)
+    if not ok_id or not id or is_item_id_blacklisted(id) then
+        return false
+    end
+    local live_obj = level.object_by_id(id)
+    if not live_obj then
+        return false
+    end
+    local sec = live_obj:section()
+
+    local saved_item_d_flag = item_parts.d_flag
+    local saved_dit_d_flag = zzz_dit and zzz_dit.d_flag or nil
+    local saved_dit_b_flag = zzz_dit and zzz_dit.b_flag or nil
+    orig_create_time_event_ref = _G.CreateTimeEvent
+    disassembly_timer_captured = false
+
+    item_parts.d_flag = true
+    if zzz_dit then
+        zzz_dit.d_flag = true
+        zzz_dit.b_flag = true
+    end
+
+    _G.CreateTimeEvent = redirected_disassembly_time_event
+
+    local ok, err = pcall(item_parts.func_disassembly, live_obj, nil)
+
+    _G.CreateTimeEvent = orig_create_time_event_ref
+    orig_create_time_event_ref = nil
+    item_parts.d_flag = saved_item_d_flag
+    if zzz_dit then
+        if saved_dit_d_flag ~= nil then zzz_dit.d_flag = saved_dit_d_flag end
+        if saved_dit_b_flag ~= nil then zzz_dit.b_flag = saved_dit_b_flag end
+    end
+
+    if not ok then
+        z_probe(1, "HCL_Loot_Special_Function", "Disassembly error on %s: %s", tostring(sec), tostring(err))
+        return false
+    end
+
+    if disassembly_timer_captured or not alife_object(id) then
+        blacklist_corpse_item_id(id)
+        if CreateTimeEvent then
+            local refresh_delay = (actor_effects and actor_effects.is_animations_on and actor_effects.is_animations_on()) and 3.15 or 0.15
+            CreateTimeEvent("hcl_loot_sync", "dis_" .. tostring(id), refresh_delay, deferred_ui_dirty_refresh_cb)
+        end
+    end
+
+    local npc = hcl_main and hcl_main.get_hovered_corpse and hcl_main.get_hovered_corpse() or nil
+    if npc and hcl_main and hcl_main.mark_corpse_looted then
+        hcl_main.mark_corpse_looted(npc:id())
+    end
+    z_probe(2, "HCL_Loot_Special_Function", "Executed DISASSEMBLY on %s (spawned into corpse)", tostring(sec))
+    return true
+end
+
+---------------------------------------------------------------------------------------
+-- Resolves the longest matching modular scope suffix from item_weapon.scopes_table.
+-- Arguments: wpn_sec (string) - Weapon section string
+-- Returns: (string|nil) - Matched scope section name or nil
+---------------------------------------------------------------------------------------
+local function resolve_modular_scope_section(wpn_sec)
+    if not wpn_sec then return nil end
+    local best_scope = nil
+    local best_len = 0
+    if item_weapon and item_weapon.scopes_table then
+        for scope_sec, _ in pairs(item_weapon.scopes_table) do
+            if type(scope_sec) == "string" then
+                local s_len = #scope_sec
+                if s_len > best_len and wpn_sec:sub(-s_len) == scope_sec then
+                    best_scope = scope_sec
+                    best_len = s_len
+                end
+            end
+        end
+    end
+    if not best_scope and utils_item and utils_item.has_scope then
+        local hs = utils_item.has_scope(wpn_sec)
+        if type(hs) == "string" and hs ~= "" then
+            best_scope = hs:gsub("^_", "")
+        end
+    end
+    return best_scope
+end
+
+---------------------------------------------------------------------------------------
+-- Field-strips all attachments and valid non-barrel WPO parts from a weapon to actor.
+-- Detaches native addons and clears server addon_flags BEFORE alife_clone_weapon so
+-- cloned parent_section weapons never duplicate silencers or grenade launchers.
+-- Arguments: wpn (game_object) - Target firearm game_object inside corpse inventory
+-- Returns: (boolean) - True if any attachment or part was stripped
+---------------------------------------------------------------------------------------
+local function execute_field_strip_on_weapon(wpn)
+    if not wpn or not db.actor or not IsWeapon(wpn) or IsMelee(wpn) then
+        return false
+    end
+
+    local ok_id, wpn_id = pcall(function() return wpn:id() end)
+    if not ok_id or not wpn_id or is_item_id_blacklisted(wpn_id) then
+        return false
+    end
+    local live_wpn = level.object_by_id(wpn_id)
+    if not live_wpn then
+        return false
+    end
+    wpn = live_wpn
+
+    local se_wpn = alife_object(wpn_id)
+    local sec = wpn:section()
+    local parent_sec = ini_sys:r_string_ex(sec, "parent_section") or sec
+
+    local stripped_attachments = {}
+    local stripped_parts = {}
+
+    -- 1. Unload magazine / ammo before stripping
+    if mag_support and mag_support.using_mags and mag_support.using_mags() and mag_support.is_mag_loaded and mag_support.is_mag_loaded(wpn) then
+        pcall(mag_support.eject_mag, wpn)
+    else
+        wpn:force_unload_magazine(true)
+    end
+
+    -- 2. Strip native C++ detachable addons (silencer, grenade launcher, native scope) FIRST
+    local detached_native_addon = false
+    if wpn:weapon_silencer_status() == 2 and utils_item and utils_item.addon_attached(wpn, "sl") then
+        local sil_sec = utils_data.read_from_ini(nil, sec, "silencer_name", "string", nil) or utils_item.get_attached_silencer(wpn)
+        if sil_sec and ini_sys:section_exist(sil_sec) then
+            wpn:weapon_addon_detach(sil_sec, false)
+            alife_create_item(sil_sec, db.actor)
+            stripped_attachments[#stripped_attachments + 1] = sil_sec
+            detached_native_addon = true
+        end
+    end
+
+    if wpn:weapon_grenadelauncher_status() == 2 and utils_item and utils_item.addon_attached(wpn, "gl") then
+        local gl_sec = utils_data.read_from_ini(nil, sec, "grenade_launcher_name", "string", nil) or utils_item.get_attached_gl(wpn)
+        if gl_sec and ini_sys:section_exist(gl_sec) then
+            wpn:weapon_addon_detach(gl_sec, false)
+            alife_create_item(gl_sec, db.actor)
+            stripped_attachments[#stripped_attachments + 1] = gl_sec
+            detached_native_addon = true
+        end
+    end
+
+    if wpn:weapon_scope_status() == 2 and utils_item and utils_item.addon_attached(wpn, "sc") and parent_sec == sec then
+        local scope_sect = utils_data.read_from_ini(nil, sec, "scopes_sect", "string", nil)
+        local sc_sec = (scope_sect and utils_data.read_from_ini(nil, scope_sect, "scope_name", "string", nil)) or utils_item.get_attached_scope(wpn)
+        if sc_sec and ini_sys:section_exist(sc_sec) then
+            wpn:weapon_addon_detach(sc_sec, false)
+            alife_create_item(sc_sec, db.actor)
+            stripped_attachments[#stripped_attachments + 1] = sc_sec
+            detached_native_addon = true
+        end
+    end
+
+    -- Sync server-side addon_flags = 0 immediately so alife_clone_weapon cannot copy stale flags
+    if detached_native_addon and se_wpn and utils_stpk and utils_stpk.get_weapon_data and utils_stpk.set_weapon_data then
+        local stpk_data = utils_stpk.get_weapon_data(se_wpn)
+        if stpk_data then
+            stpk_data.addon_flags = 0
+            utils_stpk.set_weapon_data(stpk_data, se_wpn)
+        end
+    end
+
+    -- 3. Strip valid non-barrel WPO parts and persist parts table on wpn_id before any clone
+    local parts = item_parts and item_parts.get_parts_con and item_parts.get_parts_con(wpn, nil, true) or nil
+    if parts then
+        local part_keys = {}
+        for k, v in pairs(parts) do
+            if k ~= parent_sec and k ~= sec and type(v) == "number" and v > 0 and not tostring(k):find("barrel") then
+                part_keys[#part_keys + 1] = k
+            end
+        end
+        t_sort(part_keys)
+        for i = 1, #part_keys do
+            local k = part_keys[i]
+            local cond_val = parts[k]
+            if cond_val and cond_val > 0 then
+                stripped_parts[#stripped_parts + 1] = { sec = k, cond = cond_val }
+                if zzzz_arti_jamming_repairs and zzzz_arti_jamming_repairs.remove_part then
+                    zzzz_arti_jamming_repairs.remove_part(k, parts)
+                else
+                    alife_create_item(k, db.actor, { cond = cond_val / 100 })
+                    parts[k] = -1
+                end
+            end
+        end
+        if #stripped_parts > 0 and item_parts and item_parts.set_parts_con then
+            item_parts.set_parts_con(wpn_id, parts)
+            if arti_jamming and arti_jamming.get_jammed and arti_jamming.get_jammed(wpn_id) and arti_jamming.set_jam_status then
+                arti_jamming.set_jam_status(wpn_id, nil)
+            end
+            if arti_jamming and arti_jamming.reset_cgd then
+                arti_jamming.reset_cgd()
+            end
+        end
+    end
+
+    -- 4. Strip parent_section modular scope using a single alife_clone_weapon with addon_flags = 0
+    if parent_sec ~= sec and se_wpn then
+        local mod_scope = resolve_modular_scope_section(sec)
+        if mod_scope and ini_sys:section_exist(mod_scope) then
+            alife_create_item(mod_scope, db.actor)
+            stripped_attachments[#stripped_attachments + 1] = mod_scope
+            blacklist_corpse_item_id(wpn_id)
+            if utils_stpk and utils_stpk.get_weapon_data and utils_stpk.set_weapon_data then
+                local stpk_pre = utils_stpk.get_weapon_data(se_wpn)
+                if stpk_pre then
+                    stpk_pre.addon_flags = 0
+                    utils_stpk.set_weapon_data(stpk_pre, se_wpn)
+                end
+            end
+            local se_new = alife_clone_weapon(se_wpn, parent_sec)
+            if se_new then
+                if utils_stpk and utils_stpk.get_weapon_data and utils_stpk.set_weapon_data then
+                    local stpk_post = utils_stpk.get_weapon_data(se_new)
+                    if stpk_post and stpk_post.addon_flags ~= 0 then
+                        stpk_post.addon_flags = 0
+                        utils_stpk.set_weapon_data(stpk_post, se_new)
+                    end
+                end
+                if parts and item_parts and item_parts.set_parts_con then
+                    item_parts.set_parts_con(se_new.id, dup_table(parts))
+                end
+            end
+            if CreateTimeEvent then
+                CreateTimeEvent("hcl_loot_sync", "clone_" .. tostring(wpn_id), 0.15, deferred_ui_dirty_refresh_cb)
+            end
+        end
+    end
+
+    if #stripped_attachments == 0 and #stripped_parts == 0 then
+        return false
+    end
+
+    if item_parts and item_parts.play_disassembly_snd then
+        pcall(item_parts.play_disassembly_snd, "interface\\inv_part_weapon")
+    end
+
+    -- 5. Build color-coded multi-line PDA tip (keeping \n inside pda_white text chunk)
+    local clr_w = (utils_xml and utils_xml.get_color and utils_xml.get_color("pda_white")) or "%c[default]"
+    local msg_lines = { clr_w .. game.translate_string("st_news_fieldstrip") }
+    for i = 1, #stripped_attachments do
+        local att_name = ui_item and ui_item.get_sec_name and ui_item.get_sec_name(stripped_attachments[i]) or tostring(stripped_attachments[i])
+        msg_lines[#msg_lines + 1] = s_format("\\n- %s", tostring(att_name))
+    end
+    for i = 1, #stripped_parts do
+        local p_info = stripped_parts[i]
+        local p_name = ui_item and ui_item.get_sec_name and ui_item.get_sec_name(p_info.sec) or tostring(p_info.sec)
+        local clr = (utils_xml and utils_xml.get_color_con and utils_xml.get_color_con(p_info.cond)) or clr_w
+        msg_lines[#msg_lines + 1] = s_format("\\n- %s (%s%d%%%s)", tostring(p_name), tostring(clr), m_floor(p_info.cond), tostring(clr_w))
+    end
+
+    if news_manager and news_manager.send_tip then
+        news_manager.send_tip(db.actor, t_concat(msg_lines, ""), nil, "swiss_knife", 6000)
+    end
+
+    local npc = hcl_main and hcl_main.get_hovered_corpse and hcl_main.get_hovered_corpse() or nil
+    if npc and hcl_main and hcl_main.mark_corpse_looted then
+        hcl_main.mark_corpse_looted(npc:id())
+    end
+    z_probe(2, "HCL_Loot_Special_Function", "Executed FIELD_STRIP on %s (attachments=%d, parts=%d)", tostring(sec), #stripped_attachments, #stripped_parts)
+    return true
+end
+
+---------------------------------------------------------------------------------------
+-- Evaluates HCL_Loot_Special_Function states (IDLE -> DISASSEMBLY -> FIELD_STRIP).
+-- Arguments: func_mode (string|nil) - 'disassembly', 'field_strip', or nil
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function dispatch_special_function(func_mode)
+    special_func = func_mode
+    clamp_or_init_cursor()
+
+    -- State 1: IDLE
+    if not special_func or not cursor_idx or not cursor_object then
+        special_func = nil
+        return
+    end
+    if special_func == "field_strip" and (not IsWeapon(cursor_object) or IsMelee(cursor_object)) then
+        special_func = nil
+        return
+    end
+
+    -- State 2: DISASSEMBLY
+    if special_func == "disassembly" then
+        execute_disassembly_on_cursor(cursor_object)
+        special_func = nil
+        if hcl_ui and hcl_ui.refresh_now then
+            hcl_ui.refresh_now()
+        end
+        return
+    end
+
+    -- State 3: FIELD_STRIP
+    if special_func == "field_strip" then
+        execute_field_strip_on_weapon(cursor_object)
+        special_func = nil
+        if hcl_ui and hcl_ui.refresh_now then
+            hcl_ui.refresh_now()
+        end
+        return
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Resets all mouse button hold, rising-edge, and vacuum-sweep state flags.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function reset_mouse_hold_states()
+    lmb_held = false
+    rmb_held = false
+    lmb_pressed_dik = nil
+    rmb_pressed_dik = nil
+    lmb_last_down_tg = 0
+    rmb_last_down_tg = 0
+    lmb_alt_latched = false
+    rmb_alt_latched = false
+    lmb_swept_during_hold = false
+    sweep_row_braked = false
+    sweep_active_row_ids = nil
+    sweep_brake_tg = 0
+end
+
+---------------------------------------------------------------------------------------
+-- Called by HCL_Main when the mouse wheel unlocks interaction from PREVIEW -> LOOT.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function on_enter_loot_from_preview()
+    suppress_first_preview_scroll = true
+    reset_mouse_hold_states()
+    preferred_visual_col = nil
+    clamp_or_init_cursor()
+end
+
+---------------------------------------------------------------------------------------
+-- Evaluates falling-edge mouse button release events using hardware key_state().
+-- Keeps lmb_held / rmb_held latched for the entire physical button hold duration and
+-- executes the corresponding action strictly once when the physical button is released.
+-- Arguments: force_lmb (boolean|nil) - True if invoked directly from on_key_release LMB
+--            force_rmb (boolean|nil) - True if invoked directly from on_key_release RMB
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function process_mouse_release_edges(force_lmb, force_rmb)
+    local now_tg = time_global()
+    if now_tg < post_loot_block_until_tg then
+        if is_lmb_physically_down() or is_rmb_physically_down() then
+            local ext_tg = now_tg + 250
+            if ext_tg > post_loot_block_until_tg then
+                post_loot_block_until_tg = ext_tg
+            end
+        end
+    end
+
+    local cb_status = hcl_main and hcl_main.get_callback_status and hcl_main.get_callback_status() or "IDLE"
+    if cb_status ~= "LOOT" then
+        reset_mouse_hold_states()
+        return
+    end
+
+    if lmb_held then
+        if not force_lmb and is_lmb_physically_down() then
+            -- Button is still physically held down; keep lmb_held latched for Vacuum Sweep
+            if is_alt_pressed() then
+                lmb_alt_latched = true
+            end
+        else
+            local was_swept = lmb_swept_during_hold
+            local was_alt = lmb_alt_latched or is_alt_pressed()
+            lmb_held = false
+            lmb_pressed_dik = nil
+            lmb_last_down_tg = 0
+            lmb_alt_latched = false
+            lmb_swept_during_hold = false
+            sweep_row_braked = false
+            sweep_active_row_ids = nil
+            sweep_brake_tg = 0
+            post_loot_block_until_tg = time_global() + POST_LOOT_ADS_BLOCK_MS
+
+            clamp_or_init_cursor()
+            if was_alt then
+                if cursor_idx and cursor_object then
+                    dispatch_special_function("field_strip")
+                end
+            elseif not was_swept then
+                if cursor_idx and cursor_object then
+                    if transfer_single_item_to_actor(cursor_object) and hcl_ui and hcl_ui.refresh_now then
+                        hcl_ui.refresh_now()
+                    end
+                end
+            end
+        end
+    end
+
+    if rmb_held then
+        if not force_rmb and is_rmb_physically_down() then
+            -- Button is still physically held down; wait for physical release
+            if is_alt_pressed() then
+                rmb_alt_latched = true
+            end
+        else
+            local was_alt = rmb_alt_latched or is_alt_pressed()
+            rmb_held = false
+            rmb_pressed_dik = nil
+            rmb_last_down_tg = 0
+            rmb_alt_latched = false
+            post_loot_block_until_tg = time_global() + POST_LOOT_ADS_BLOCK_MS
+
+            clamp_or_init_cursor()
+            if cursor_idx then
+                if was_alt and cursor_object then
+                    dispatch_special_function("disassembly")
+                elseif not was_alt then
+                    loot_all_corpse_items()
+                end
+            end
+        end
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Synchronizes HCL_Loot state (IDLE vs LOOT) and checks corpse inventory fingerprint
+-- across both PREVIEW and LOOT states so asynchronous death drops refresh immediately.
+-- Arguments: corpse_status (string) - Current corpse_check_status
+--            cb_status (string) - Current callback_status
+--            npc (game_object|nil) - Hovered corpse object
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function tick(corpse_status, cb_status, npc)
+    suppress_first_preview_scroll = false
+
+    if corpse_status ~= "VALID" or not npc or (cb_status ~= "PREVIEW" and cb_status ~= "LOOT") then
+        cursor_idx = nil
+        cursor_object = nil
+        cursor_cell_idx = nil
+        preferred_visual_col = nil
+        reset_mouse_hold_states()
+        special_func = nil
+        tracked_corpse_id = nil
+        last_inventory_hash = nil
+        return
+    end
+
+    local npc_id = npc:id()
+    local inv_hash, _, inv_map = scan_corpse_inventory(npc)
+    if tracked_corpse_id ~= npc_id or last_inventory_hash ~= inv_hash then
+        tracked_corpse_id = npc_id
+        last_inventory_hash = inv_hash
+        corpse_objects = inv_map
+        if hcl_ui and hcl_ui.mark_dirty then
+            hcl_ui.mark_dirty()
+        end
+    end
+
+    -- State 1: IDLE (callback_status is not LOOT)
+    if cb_status ~= "LOOT" then
+        cursor_idx = nil
+        cursor_object = nil
+        cursor_cell_idx = nil
+        preferred_visual_col = nil
+        reset_mouse_hold_states()
+        special_func = nil
+        return
+    end
+
+    -- State 2: LOOT
+    process_mouse_release_edges(false, false)
+    clamp_or_init_cursor()
+end
+
+---------------------------------------------------------------------------------------
+-- Intercepts LMB/RMB and Weapon Fire/ADS before the engine processes them during LOOT.
+-- Latches rising-edge press state once per click while consuming fire/ADS every frame;
+-- actual item actions execute strictly once on physical button release.
+-- Arguments: key (number) - DIK key/mouse code
+--            bind (number) - Action binding ID
+--            dis (boolean) - Disabled flag
+--            flags (table) - Callback flags table (flags.ret_value = false consumes input)
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function on_before_key_press(key, bind, dis, flags)
+    local lalt = DIK_keys and DIK_keys.DIK_LMENU or 56
+    local ralt = DIK_keys and DIK_keys.DIK_RMENU or 184
+    if key == lalt or key == ralt then
+        alt_modifier = true
+    end
+
+    local now_tg = time_global()
+    local in_post_loot_grace = (now_tg < post_loot_block_until_tg)
+    local cb_status = hcl_main and hcl_main.get_callback_status and hcl_main.get_callback_status() or "IDLE"
+    local is_loot_active = (cb_status == "LOOT" and #grid_rows > 0)
+
+    if not is_loot_active and not in_post_loot_grace and not lmb_held and not rmb_held then
+        return
+    end
+
+    local m1_dik = DIK_keys and DIK_keys.MOUSE_1 or 337
+    local m2_dik = DIK_keys and DIK_keys.MOUSE_2 or 338
+    local is_lmb = (key == m1_dik) or (bind ~= nil and bind ~= 0 and key_bindings and bind == key_bindings.kWPN_FIRE)
+    local is_rmb = (key == m2_dik) or (bind ~= nil and bind ~= 0 and key_bindings and bind == key_bindings.kWPN_ZOOM)
+
+    if not is_lmb and not is_rmb then
+        return
+    end
+
+    if flags then
+        flags.ret_value = false
+    end
+
+    if not is_loot_active then
+        if in_post_loot_grace and key_state then
+            local m1_down = (key_state(m1_dik) ~= 0)
+            local m2_down = (key_state(m2_dik) ~= 0)
+            if m1_down or m2_down then
+                post_loot_block_until_tg = now_tg + 250
+            end
+        end
+        return
+    end
+
+    local alt_now = is_alt_pressed()
+
+    if is_lmb then
+        lmb_last_down_tg = now_tg
+        if not lmb_held then
+            lmb_held = true
+            lmb_pressed_dik = key
+            lmb_swept_during_hold = false
+            lmb_alt_latched = alt_now
+            sweep_row_braked = false
+            sweep_brake_tg = 0
+            snapshot_current_row_ids()
+        elseif alt_now then
+            lmb_alt_latched = true
+        end
+    elseif is_rmb then
+        rmb_last_down_tg = now_tg
+        if not rmb_held then
+            rmb_held = true
+            rmb_pressed_dik = key
+            rmb_alt_latched = alt_now
+        elseif alt_now then
+            rmb_alt_latched = true
+        end
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Handles physical key releases and forwards mouse release edges if triggered by engine.
+-- Arguments: key (number) - DIK key/mouse code
+--            bind (number) - Action binding ID
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function on_key_release(key, bind)
+    local lalt = DIK_keys and DIK_keys.DIK_LMENU or 56
+    local ralt = DIK_keys and DIK_keys.DIK_RMENU or 184
+    if key == lalt or key == ralt then
+        alt_modifier = false
+    end
+
+    local m1_dik = DIK_keys and DIK_keys.MOUSE_1 or 337
+    local m2_dik = DIK_keys and DIK_keys.MOUSE_2 or 338
+    local is_lmb = (key == m1_dik) or (bind ~= nil and bind ~= 0 and key_bindings and bind == key_bindings.kWPN_FIRE)
+    local is_rmb = (key == m2_dik) or (bind ~= nil and bind ~= 0 and key_bindings and bind == key_bindings.kWPN_ZOOM)
+
+    if is_lmb and lmb_held then
+        process_mouse_release_edges(true, false)
+    elseif is_rmb and rmb_held then
+        process_mouse_release_edges(false, true)
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Handles mouse wheel scrolling in LOOT state (normal row step, ALT col step, LMB sweep).
+-- Arguments: dir (number) - Wheel direction
+--            flags (table) - Callback flags table
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function on_mouse_wheel(dir, flags)
+    local cb_status = hcl_main and hcl_main.get_callback_status and hcl_main.get_callback_status() or "IDLE"
+    if cb_status ~= "LOOT" then
+        return
+    end
+    if suppress_first_preview_scroll then
+        suppress_first_preview_scroll = false
+        if flags then
+            flags.ret_value = false
+        end
+        return
+    end
+
+    handle_loot_scroll(dir, is_alt_pressed())
+    if flags then
+        flags.ret_value = false
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Returns the public [output] Cursor Parameters of HCL_Loot.
+-- Arguments: none
+-- Returns: (table|nil, game_object|nil, number|nil) - cursor_idx, cursor_object, cursor_cell_idx
+---------------------------------------------------------------------------------------
+function get_cursor_params()
+    return cursor_idx, cursor_object, cursor_cell_idx
+end
+
+---------------------------------------------------------------------------------------
+-- Returns the current 2D cursor_idx table ({ x = col, y = row }) or nil.
+-- Arguments: none
+-- Returns: (table|nil) - Cursor coordinate table
+---------------------------------------------------------------------------------------
+function get_cursor_idx()
+    return cursor_idx
+end
+
+---------------------------------------------------------------------------------------
+-- Returns the currently selected item game_object or nil.
+-- Arguments: none
+-- Returns: (game_object|nil) - Selected item game_object
+---------------------------------------------------------------------------------------
+function get_cursor_object()
+    return cursor_object
+end
+
+---------------------------------------------------------------------------------------
+-- Returns the UICellContainer cell index corresponding to cursor_idx or nil.
+-- Arguments: none
+-- Returns: (number|nil) - Cell index inside UICellContainer.cell
+---------------------------------------------------------------------------------------
+function get_cursor_cell_idx()
+    return cursor_cell_idx
+end
+
+---------------------------------------------------------------------------------------
+-- Registers HCL_Loot input and inventory callbacks at game start.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function on_game_start()
+    RegisterScriptCallback("on_before_key_press", on_before_key_press)
+    RegisterScriptCallback("on_key_release", on_key_release)
+    RegisterScriptCallback("on_mouse_wheel", on_mouse_wheel)
+    z_probe(2, "HCL_Loot", "HCL_Loot control system initialized")
+end

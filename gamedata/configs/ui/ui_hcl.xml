@@ -1,4 +1,5 @@
 <w>
-    <main x="0" y="0" width="350" height="300"/>
-    <hcl_loot_prof x="8" y="54" width="334" height="217" stretch="1"/>
+    <main x="0" y="0" width="300" height="300"/>
+    <hcl_loot_window x="8" y="54" width="284" height="217" stretch="1"/>
+    <hcl_loot_prof x="8" y="54" width="284" height="217" stretch="1"/>
 </w>

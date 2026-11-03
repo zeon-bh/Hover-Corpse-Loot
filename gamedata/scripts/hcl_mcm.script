@@ -1,5 +1,5 @@
-local Z_DEBUG_LEVEL = 2 -- 0=OFF, 1=ERROR, 2=WARN/STATE, 3=VERBOSE
-local SCRIPT_NAME = "hcl_mcm"
+local debug_level = 2 -- 0=OFF, 1=ERROR, 2=WARN/STATE, 3=VERBOSE
+local m_floor = math.floor
 
 ---------------------------------------------------------------------------------------
 -- Outputs formatted chokepoint diagnostic telemetry to the X-Ray console log.
@@ -10,29 +10,53 @@ local SCRIPT_NAME = "hcl_mcm"
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
 local function z_probe(level, station, msg, ...)
-    if not Z_DEBUG_LEVEL or level > Z_DEBUG_LEVEL then return end
-    local formatted = (select("#", ...) > 0) and string.format(tostring(msg), ...) or tostring(msg)
-    printf("[%s] | %s | %s", SCRIPT_NAME, tostring(station), formatted)
+    if level > debug_level then return end
+    local ok, formatted = pcall(string.format, msg, ...)
+    printf("[Hover Corpse Loot] | %s | %s", tostring(station), ok and formatted or tostring(msg))
 end
 
--- [SYSTEM] HoverCorpseLootMCM
+-- [SYSTEM] HCL_MCM
 
 local DEFAULTS = {
-    hcl_toggle            = true,
-    hcl_cond              = true,
-    hcl_parts_cond        = true,
-    hcl_parts_repair_type = true,
-    hcl_patches_on_armor  = true,
-    hcl_x_offset          = 150,
-    hcl_y_offset          = 0,
-    hcl_ui_opacity        = 75,
-    hcl_ui_delay          = 200,
-    hcl_max_dist          = 2,
+    hcl_toggle               = true,
+    hcl_cond                 = true,
+    hcl_parts_cond           = true,
+    hcl_parts_repair_type    = true,
+    hcl_patches_on_armor     = true,
+    hcl_x_offset             = 150,
+    hcl_y_offset             = 0,
+    hcl_ui_opacity           = 75,
+    hcl_ui_delay             = 200,
+    hcl_max_dist             = 2,
+    hcl_bg_scolor            = "Amber",
+    hcl_bg_scolor_brightness = 75,
+    hcl_s_acceleration       = 1.0,
+}
+
+local OPTION_PATHS = {
+    hcl_toggle               = "hcl/ui_options/hcl_toggle",
+    hcl_cond                 = "hcl/ui_options/hcl_cond",
+    hcl_parts_cond           = "hcl/ui_options/hcl_parts_cond",
+    hcl_parts_repair_type    = "hcl/ui_options/hcl_parts_repair_type",
+    hcl_patches_on_armor     = "hcl/ui_options/hcl_patches_on_armor",
+    hcl_x_offset             = "hcl/ui_options/hcl_x_offset",
+    hcl_y_offset             = "hcl/ui_options/hcl_y_offset",
+    hcl_ui_opacity           = "hcl/ui_options/hcl_ui_opacity",
+    hcl_ui_delay             = "hcl/ui_options/hcl_ui_delay",
+    hcl_max_dist             = "hcl/ui_options/hcl_max_dist",
+    hcl_bg_scolor            = "hcl/ui_controls/hcl_bg_scolor",
+    hcl_bg_scolor_brightness = "hcl/ui_controls/hcl_bg_scolor_brightness",
+    hcl_s_acceleration       = "hcl/ui_controls/hcl_s_acceleration",
+}
+
+local COLOR_PRESETS = {
+    Amber = { r = 255, g = 185, b = 35 },
+    Cyan  = { r = 55,  g = 225, b = 255 },
+    White = { r = 240, g = 245, b = 250 },
+    Green = { r = 65,  g = 235, b = 95 },
 }
 
 local settings_cache = {}
-
--- Probe once at script load whether G.A.M.M.A.'s firearm condition text suppression mod is active.
 local gamma_hides_gun_cond = (grok_gun_no_condition_text ~= nil)
 
 ---------------------------------------------------------------------------------------
@@ -42,30 +66,37 @@ local gamma_hides_gun_cond = (grok_gun_no_condition_text ~= nil)
 ---------------------------------------------------------------------------------------
 local function refresh_settings_cache()
     for opt_id, def_val in pairs(DEFAULTS) do
+        local resolved = nil
         if ui_mcm then
-            local val = ui_mcm.get("hcl/" .. opt_id)
-            if val ~= nil then
-                settings_cache[opt_id] = val
-            else
-                settings_cache[opt_id] = def_val
+            local mcm_path = OPTION_PATHS[opt_id]
+            if mcm_path then
+                resolved = ui_mcm.get(mcm_path)
             end
+            if resolved == nil then
+                resolved = ui_mcm.get("hcl/" .. opt_id)
+            end
+        end
+        if resolved ~= nil then
+            settings_cache[opt_id] = resolved
         else
             settings_cache[opt_id] = def_val
         end
     end
-    z_probe(2, "HoverCorpseLootMCM", "Settings cache refreshed (toggle=%s, x=%s, y=%s, opacity=%s, delay=%s, dist=%s)",
+    z_probe(2, "HCL_MCM", "Settings cache refreshed (toggle=%s, x=%s, y=%s, opacity=%s, delay=%s, dist=%s, color=%s, accel=%s)",
         tostring(settings_cache.hcl_toggle),
         tostring(settings_cache.hcl_x_offset),
         tostring(settings_cache.hcl_y_offset),
         tostring(settings_cache.hcl_ui_opacity),
         tostring(settings_cache.hcl_ui_delay),
-        tostring(settings_cache.hcl_max_dist))
+        tostring(settings_cache.hcl_max_dist),
+        tostring(settings_cache.hcl_bg_scolor),
+        tostring(settings_cache.hcl_s_acceleration))
 end
 
 ---------------------------------------------------------------------------------------
 -- Retrieves the cached value of an HCL MCM setting with fallback to its default.
 -- Arguments: opt_id (string) - Option identifier matching DEFAULTS keys
--- Returns: (any) - Cached boolean or numeric option value
+-- Returns: (any) - Cached boolean, numeric, or string option value
 ---------------------------------------------------------------------------------------
 function get(opt_id)
     if not opt_id then return nil end
@@ -101,6 +132,26 @@ function should_show_cond(obj)
 end
 
 ---------------------------------------------------------------------------------------
+-- Computes the ARGB color value for the item selection cursor from MCM settings.
+-- Arguments: alpha_override (number|nil) - Optional alpha channel override (0..255)
+-- Returns: (number) - Packed ARGB color integer via GetARGB
+---------------------------------------------------------------------------------------
+function get_cursor_argb(alpha_override)
+    local color_name = tostring(get("hcl_bg_scolor") or "Amber")
+    local rgb = COLOR_PRESETS[color_name] or COLOR_PRESETS.Amber
+    local br_pct = tonumber(get("hcl_bg_scolor_brightness")) or 75
+    if br_pct < 1 then br_pct = 1 end
+    if br_pct > 100 then br_pct = 100 end
+    local scale = br_pct / 100.0
+    local r = m_floor((rgb.r * scale) + 0.5)
+    local g = m_floor((rgb.g * scale) + 0.5)
+    local b = m_floor((rgb.b * scale) + 0.5)
+    local a = alpha_override or m_floor((180 * scale) + 35)
+    if a > 255 then a = 255 end
+    return GetARGB(a, r, g, b)
+end
+
+---------------------------------------------------------------------------------------
 -- Callback handler invoked by MCM when the user applies option changes.
 -- Arguments: none
 -- Returns: (nil)
@@ -112,27 +163,56 @@ end
 ---------------------------------------------------------------------------------------
 -- Constructs and returns the Mod Configuration Menu (MCM) option tree for HCL.
 -- Arguments: none
--- Returns: (table) - MCM menu specification table for menu id 'hcl'
+-- Returns: (table) - MCM menu specification table for menu id 'hcl' with two tabs
 ---------------------------------------------------------------------------------------
 function on_mcm_load()
     local op = {
         id = "hcl",
-        sh = true,
         gr = {
-            { id = "title", type = "slide", link = "ui_options_slider_player", text = "ui_mcm_menu_hcl", size = { 512, 50 }, spacing = 20 },
-            { id = "hcl_toggle", type = "check", val = 1, def = DEFAULTS.hcl_toggle },
-            { id = "divider_icons", type = "line" },
-            { id = "hcl_cond", type = "check", val = 1, def = DEFAULTS.hcl_cond },
-            { id = "hcl_parts_cond", type = "check", val = 1, def = DEFAULTS.hcl_parts_cond },
-            { id = "hcl_parts_repair_type", type = "check", val = 1, def = DEFAULTS.hcl_parts_repair_type },
-            { id = "hcl_patches_on_armor", type = "check", val = 1, def = DEFAULTS.hcl_patches_on_armor },
-            { id = "divider_sliders", type = "line" },
-            { id = "hcl_x_offset", type = "track", val = 2, min = 0, max = 500, step = 5, def = DEFAULTS.hcl_x_offset },
-            { id = "hcl_y_offset", type = "track", val = 2, min = 0, max = 250, step = 5, def = DEFAULTS.hcl_y_offset },
-            { id = "hcl_ui_opacity", type = "track", val = 2, min = 10, max = 100, step = 1, def = DEFAULTS.hcl_ui_opacity },
-            { id = "hcl_ui_delay", type = "track", val = 2, min = 100, max = 500, step = 10, def = DEFAULTS.hcl_ui_delay },
-            { id = "hcl_max_dist", type = "track", val = 2, min = 2, max = 5, step = 0.5, def = DEFAULTS.hcl_max_dist },
-        }
+            {
+                id = "ui_options",
+                sh = true,
+                text = "ui_mcm_hcl_tab_ui_options",
+                gr = {
+                    { id = "title", type = "slide", link = "ui_options_slider_player", text = "ui_mcm_hcl_title", size = { 512, 50 }, spacing = 20 },
+                    { id = "hcl_toggle", type = "check", val = 1, def = DEFAULTS.hcl_toggle },
+                    { id = "divider_icons", type = "line" },
+                    { id = "hcl_cond", type = "check", val = 1, def = DEFAULTS.hcl_cond },
+                    { id = "hcl_parts_cond", type = "check", val = 1, def = DEFAULTS.hcl_parts_cond },
+                    { id = "hcl_parts_repair_type", type = "check", val = 1, def = DEFAULTS.hcl_parts_repair_type },
+                    { id = "hcl_patches_on_armor", type = "check", val = 1, def = DEFAULTS.hcl_patches_on_armor },
+                    { id = "divider_sliders", type = "line" },
+                    { id = "hcl_x_offset", type = "track", val = 2, min = 0, max = 500, step = 5, def = DEFAULTS.hcl_x_offset },
+                    { id = "hcl_y_offset", type = "track", val = 2, min = 0, max = 250, step = 5, def = DEFAULTS.hcl_y_offset },
+                    { id = "hcl_ui_opacity", type = "track", val = 2, min = 10, max = 100, step = 1, def = DEFAULTS.hcl_ui_opacity },
+                    { id = "hcl_ui_delay", type = "track", val = 2, min = 100, max = 500, step = 10, def = DEFAULTS.hcl_ui_delay },
+                    { id = "hcl_max_dist", type = "track", val = 2, min = 2, max = 5, step = 0.5, def = DEFAULTS.hcl_max_dist },
+                },
+            },
+            {
+                id = "ui_controls",
+                sh = true,
+                text = "ui_mcm_hcl_tab_ui_controls",
+                gr = {
+                    { id = "controls_title", type = "slide", link = "ui_options_slider_player", text = "ui_mcm_hcl_controls_title", size = { 512, 50 }, spacing = 20 },
+                    {
+                        id = "hcl_bg_scolor",
+                        type = "list",
+                        val = 0,
+                        def = DEFAULTS.hcl_bg_scolor,
+                        no_str = true,
+                        content = {
+                            { "Amber", "Amber" },
+                            { "Cyan",  "Cyan" },
+                            { "White", "White" },
+                            { "Green", "Green" },
+                        },
+                    },
+                    { id = "hcl_bg_scolor_brightness", type = "track", val = 2, min = 1, max = 100, step = 1, def = DEFAULTS.hcl_bg_scolor_brightness },
+                    { id = "hcl_s_acceleration", type = "track", val = 2, min = 1.0, max = 2.0, step = 0.1, def = DEFAULTS.hcl_s_acceleration },
+                },
+            },
+        },
     }
     return op
 end

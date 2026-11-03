@@ -1,0 +1,955 @@
+local debug_level = 2 -- 0=OFF, 1=ERROR, 2=WARN/STATE, 3=VERBOSE
+local m_floor = math.floor
+local m_min = math.min
+local m_max = math.max
+local m_abs = math.abs
+local m_exp = math.exp
+local s_format = string.format
+
+---------------------------------------------------------------------------------------
+-- Outputs formatted chokepoint diagnostic telemetry to the X-Ray console log.
+-- Arguments: level (number) - Severity threshold (1=ERROR, 2=WARN/STATE, 3=VERBOSE)
+--            station (string) - Name of the executing system or function
+--            msg (string) - Format string or message
+--            ... (any) - Optional format arguments passed to string.format
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function z_probe(level, station, msg, ...)
+    if level > debug_level then return end
+    local ok, formatted = pcall(string.format, msg, ...)
+    printf("[Hover Corpse Loot] | %s | %s", tostring(station), ok and formatted or tostring(msg))
+end
+
+-- [SYSTEM] HCL_UI
+
+local HCL_UI_MAIN_X     = 300
+local HCL_UI_MAIN_Y_MIN = 100
+local HCL_UI_MAIN_Y_MAX = 625
+local HCL_HEADER_H      = 50
+local HCL_FOOTER_H      = 25
+local HCL_LOOT_PAD      = 6
+
+local hud_instance = nil
+local current_ui_state = "HIDDEN"
+local rendered_corpse_id = nil
+local rendered_inv_hash = nil
+local ui_dirty = false
+
+---------------------------------------------------------------------------------------
+-- Clamps a numeric value between a minimum and maximum bound.
+-- Arguments: val (number) - Input number
+--            min_v (number) - Lower bound
+--            max_v (number) - Upper bound
+-- Returns: (number) - Clamped value
+---------------------------------------------------------------------------------------
+local function clamp_val(val, min_v, max_v)
+    if val < min_v then return min_v end
+    if val > max_v then return max_v end
+    return val
+end
+
+---------------------------------------------------------------------------------------
+-- Resolves the active font profile (inheriting MO2 Font Mod overrides or default fonts).
+-- Uses Letterica16Russian for subtext, footer, and tag to avoid legacy stat_font garbling.
+-- Arguments: role (string) - 'title', 'subtext', 'footer', 'tag', or 'status'
+-- Returns: (CGameFont) - Engine font pointer
+---------------------------------------------------------------------------------------
+local function resolve_active_font(role)
+    local inv_gui = ui_inventory and ui_inventory.GUI or nil
+    if role == "title" or role == "status" then
+        if inv_gui and inv_gui.npc_name and inv_gui.npc_name.GetFont then
+            local f = inv_gui.npc_name:GetFont()
+            if f then return f end
+        end
+        return GetFontLetterica18Russian and GetFontLetterica18Russian() or GetFontMedium()
+    else
+        return GetFontLetterica16Russian and GetFontLetterica16Russian() or GetFontSmall()
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Instance override for UICellContainer:GetDeferredEnabled to force immediate cell draw.
+-- Arguments: self (UICellContainer) - Loot cell container instance
+-- Returns: (boolean) - Always false so Inventory Antifreeze does not defer HUD cells
+---------------------------------------------------------------------------------------
+local function container_disable_deferred(self)
+    return false
+end
+
+---------------------------------------------------------------------------------------
+-- Resolves the active SortingPlus sort_method for corpse loot ('sizekind' default).
+-- Defaults to 'sizekind' before ui_inventory.GUI is opened so RAX Icon Override's
+-- uninitialized 'kind' category-line state cannot hide or abort initial cell placement.
+-- Arguments: none
+-- Returns: (string) - Sort method identifier for UICellContainer
+---------------------------------------------------------------------------------------
+local function resolve_sorting_method()
+    if ui_inventory and ui_inventory.GUI and ui_inventory.GUI.CC and ui_inventory.GUI.CC["npc_bag"] then
+        local sm = ui_inventory.GUI.CC["npc_bag"].sort_method
+        if sm and sm ~= "" then
+            return sm
+        end
+    end
+    return "sizekind"
+end
+
+---------------------------------------------------------------------------------------
+-- Temporarily applies HCL MCM icon overlay masks over Utjan z_item_icon_info on Reinit.
+-- Arguments: container (UICellContainer) - Target cell container
+--            objects (table) - Sparse map of {[item_id] = game_object}
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function reinit_container_with_overlay_masks(container, objects)
+    if not container then return end
+    container.sort_method = resolve_sorting_method()
+
+    local z_settings = z_item_icon_info and z_item_icon_info.settings
+    local saved = nil
+
+    if z_settings and hcl_mcm then
+        saved = {}
+        if not hcl_mcm.get("hcl_cond") and z_settings.cond_text then
+            saved.cond_enable = z_settings.cond_text.enable
+            z_settings.cond_text.enable = false
+        end
+        if not hcl_mcm.get("hcl_parts_cond") and z_settings.part_dots then
+            saved.parts_enable = z_settings.part_dots.enable
+            z_settings.part_dots.enable = false
+        end
+        if not hcl_mcm.get("hcl_parts_repair_type") then
+            if z_settings.wpn_info then
+                saved.show_gun_repair_type = z_settings.wpn_info.show_gun_repair_type
+                z_settings.wpn_info.show_gun_repair_type = false
+            end
+            if z_settings.armor_info then
+                saved.show_armor_type = z_settings.armor_info.show_armor_type
+                saved.show_helmet_type = z_settings.armor_info.show_helmet_type
+                z_settings.armor_info.show_armor_type = false
+                z_settings.armor_info.show_helmet_type = false
+            end
+        end
+        if not hcl_mcm.get("hcl_patches_on_armor") and z_settings.armor_info then
+            saved.show_patch = z_settings.armor_info.show_patch
+            z_settings.armor_info.show_patch = false
+        end
+    end
+
+    local ok, err = pcall(container.Reinit, container, objects)
+
+    if saved and z_settings then
+        if saved.cond_enable ~= nil and z_settings.cond_text then
+            z_settings.cond_text.enable = saved.cond_enable
+        end
+        if saved.parts_enable ~= nil and z_settings.part_dots then
+            z_settings.part_dots.enable = saved.parts_enable
+        end
+        if saved.show_gun_repair_type ~= nil and z_settings.wpn_info then
+            z_settings.wpn_info.show_gun_repair_type = saved.show_gun_repair_type
+        end
+        if z_settings.armor_info then
+            if saved.show_armor_type ~= nil then
+                z_settings.armor_info.show_armor_type = saved.show_armor_type
+            end
+            if saved.show_helmet_type ~= nil then
+                z_settings.armor_info.show_helmet_type = saved.show_helmet_type
+            end
+            if saved.show_patch ~= nil then
+                z_settings.armor_info.show_patch = saved.show_patch
+            end
+        end
+    end
+
+    if not ok then
+        z_probe(1, "HCL_UI", "UICellContainer:Reinit error: %s", tostring(err))
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Allocates a single smooth-gradient separator static backed by ui\ui_hcl_separator.dds.
+-- Arguments: parent_wnd (CUIWindow) - Parent window to attach the separator to
+-- Returns: (CUIStatic) - Separator static widget with continuous per-pixel edge fade
+---------------------------------------------------------------------------------------
+local function create_gradient_separator(parent_wnd)
+    local st = CUIStatic()
+    st:SetAutoDelete(true)
+    st:InitTexture("ui\\ui_hcl_separator")
+    st:SetStretchTexture(true)
+    parent_wnd:AttachChild(st)
+    return st
+end
+
+---------------------------------------------------------------------------------------
+-- Positions and tints a smooth edge-faded separator bar (50% pale white brightness).
+-- Arguments: sep_wnd (CUIStatic) - Separator static widget from create_gradient_separator
+--            x (number) - Left X coordinate
+--            y (number) - Top Y coordinate
+--            width (number) - Total separator width
+--            height (number) - Separator thickness in pixels
+--            opacity_scale (number) - Window opacity multiplier (0.1 .. 1.0)
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function layout_gradient_separator(sep_wnd, x, y, width, height, opacity_scale)
+    if not sep_wnd then return end
+    sep_wnd:SetWndPos(vector2():set(x, y))
+    sep_wnd:SetWndSize(vector2():set(width, height))
+    local a = clamp_val(m_floor((128 * (opacity_scale or 1.0)) + 0.5), 10, 128)
+    sep_wnd:SetTextureColor(GetARGB(a, 235, 240, 245))
+end
+
+class "HCL_HUD" (CUIScriptWnd)
+
+---------------------------------------------------------------------------------------
+-- Initializes the Hover Corpse Loot HUD window and all child widgets once.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function HCL_HUD:__init() super()
+    self.xml = CScriptXmlInit()
+    self.xml:ParseFile("ui_hcl.xml")
+    self.is_attached = false
+    self.cur_x = 0
+    self.cur_y = 0
+    self.cur_w = 0
+    self.cur_h = 0
+    self.target_x = 0
+    self.target_y = 0
+    self.target_w = 0
+    self.target_h = 0
+    self.cursor_initialized = false
+    self.last_interp_tg = 0
+    self.content_h = 0
+    self.loot_h = 0
+    self.max_scroll = 0
+    self.scroll_pos = 0
+    self:InitControls()
+end
+
+---------------------------------------------------------------------------------------
+-- Destructor for HCL_HUD.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function HCL_HUD:__finalize()
+end
+
+---------------------------------------------------------------------------------------
+-- Allocates main window, header, loot container, cursor, scrollbar, and footer.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function HCL_HUD:InitControls()
+    self:SetWndRect(Frect():set(0, 0, 1024, 768))
+    self:SetAutoDelete(true)
+
+    self.frame = CUIWindow()
+    self.frame:SetAutoDelete(true)
+    self:AttachChild(self.frame)
+
+    -- OLED black background static with adjustable opacity from hcl_ui_opacity
+    self.bg = CUIStatic()
+    self.bg:SetAutoDelete(true)
+    self.bg:InitTexture("ui_inGame2_white_rect")
+    self.bg:SetStretchTexture(true)
+    self.frame:AttachChild(self.bg)
+
+    -- Header Box (hcl_header: 50 px height at top of hcl_ui_main)
+    self.header = CUIWindow()
+    self.header:SetAutoDelete(true)
+    self.frame:AttachChild(self.header)
+
+    self.patch_icon = CUIStatic()
+    self.patch_icon:SetAutoDelete(true)
+    self.patch_icon:SetStretchTexture(true)
+    self.header:AttachChild(self.patch_icon)
+
+    self.header_title = CUITextWnd()
+    self.header_title:SetAutoDelete(true)
+    self.header_title:SetFont(resolve_active_font("title"))
+    self.header_title:SetTextColor(GetARGB(255, 235, 238, 242))
+    self.header_title:SetTextAlignment(0)
+    self.header_title:SetVTextAlignment(1)
+    self.header:AttachChild(self.header_title)
+
+    self.header_rank = CUITextWnd()
+    self.header_rank:SetAutoDelete(true)
+    self.header_rank:SetFont(resolve_active_font("subtext"))
+    self.header_rank:SetTextColor(GetARGB(205, 170, 175, 182))
+    self.header_rank:SetTextAlignment(0)
+    self.header_rank:SetVTextAlignment(1)
+    self.header:AttachChild(self.header_rank)
+
+    -- Looted Tag (hcl_tag: right-aligned on the same Y-axis row as Stalker Rank)
+    self.hcl_tag = CUITextWnd()
+    self.hcl_tag:SetAutoDelete(true)
+    self.hcl_tag:SetFont(resolve_active_font("tag"))
+    self.hcl_tag:SetTextColor(GetARGB(255, 65, 245, 95))
+    self.hcl_tag:SetTextAlignment(1)
+    self.hcl_tag:SetVTextAlignment(1)
+    self.hcl_tag:SetText(game.translate_string("st_hcl_looted"))
+    self.hcl_tag:Show(false)
+    self.header:AttachChild(self.hcl_tag)
+
+    self.header_sep_segs = create_gradient_separator(self.header)
+
+    -- Main Loot Window (hcl_loot_window via utils_ui.UICellContainer)
+    self.loot_container = utils_ui.UICellContainer("hcl_loot", self, nil, "hcl_loot_window", self.frame)
+    self.loot_container.sort_method = resolve_sorting_method()
+    self.loot_container.showcase = false
+    self.loot_container.can_select = false
+    self.loot_container.disable_drag = true
+    self.loot_container.disable_highlight = true
+    self.loot_container.disable_info = true
+    self.loot_container.disable_bar = false
+    self.loot_container.deferred = false
+    self.loot_container.GetDeferredEnabled = container_disable_deferred
+    if self.loot_container.pad then
+        self.loot_container.pad:Show(false)
+    end
+
+    -- Select Cursor (hcl_cursor: smooth gradient transition background fill inside scroll content)
+    self.cursor_box = CUIStatic()
+    self.cursor_box:SetAutoDelete(true)
+    self.cursor_box:InitTexture("ui_inGame2_white_rect")
+    self.cursor_box:SetStretchTexture(true)
+    self.cursor_box:Show(false)
+    if self.loot_container and self.loot_container.st then
+        self.loot_container.st:AttachChild(self.cursor_box)
+    else
+        self.frame:AttachChild(self.cursor_box)
+    end
+
+    -- Status Text Overlays (<CLAIMED> in bright yellow, <EMPTY> in pale white)
+    self.status_text = CUITextWnd()
+    self.status_text:SetAutoDelete(true)
+    self.status_text:SetFont(resolve_active_font("status"))
+    self.status_text:SetTextAlignment(2)
+    self.status_text:SetVTextAlignment(1)
+    self.status_text:Show(false)
+    self.frame:AttachChild(self.status_text)
+
+    -- Slim Scrollbar (only shown when viewport exceeds 625 px height cap)
+    self.sb_track = CUIStatic()
+    self.sb_track:SetAutoDelete(true)
+    self.sb_track:InitTexture("ui_inGame2_white_rect")
+    self.sb_track:SetStretchTexture(true)
+    self.sb_track:SetTextureColor(GetARGB(45, 200, 205, 210))
+    self.sb_track:Show(false)
+    self.frame:AttachChild(self.sb_track)
+
+    self.sb_thumb = CUIStatic()
+    self.sb_thumb:SetAutoDelete(true)
+    self.sb_thumb:InitTexture("ui_inGame2_white_rect")
+    self.sb_thumb:SetStretchTexture(true)
+    self.sb_thumb:SetTextureColor(GetARGB(190, 225, 230, 235))
+    self.sb_thumb:Show(false)
+    self.frame:AttachChild(self.sb_thumb)
+
+    -- Footer Bar (hcl_footer: 25 px height at bottom of hcl_ui_main)
+    self.footer = CUIWindow()
+    self.footer:SetAutoDelete(true)
+    self.frame:AttachChild(self.footer)
+
+    self.footer_sep_segs = create_gradient_separator(self.footer)
+
+    self.footer_text = CUITextWnd()
+    self.footer_text:SetAutoDelete(true)
+    self.footer_text:SetFont(resolve_active_font("footer"))
+    self.footer_text:SetTextColor(GetARGB(235, 225, 230, 235))
+    self.footer_text:SetTextAlignment(2)
+    self.footer_text:SetVTextAlignment(1)
+    self.footer_text:SetText("")
+    self.footer:AttachChild(self.footer_text)
+end
+
+---------------------------------------------------------------------------------------
+-- Populates the header faction patch, 'Name - Faction' title, rank subtext, and [LOOTED] tag.
+-- Positions [LOOTED] on the same Y-axis level (y = 26) as Stalker Rank subtext.
+-- Arguments: npc (game_object) - Hovered dead stalker object
+--            win_w (number) - Aspect-corrected window width
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function HCL_HUD:PopulateHeader(npc, win_w)
+    if not npc then return end
+    local ratio = utils_xml.screen_ratio()
+    local pad_x = 8 * ratio
+    local text_x = pad_x
+
+    self.header_title:SetFont(resolve_active_font("title"))
+    self.header_rank:SetFont(resolve_active_font("subtext"))
+    self.hcl_tag:SetFont(resolve_active_font("tag"))
+
+    local comm = character_community and character_community(npc) or "stalker"
+    local patch_sec = comm .. "_patch"
+
+    if comm ~= "trader" and ini_sys and ini_sys:section_exist(patch_sec) then
+        local tex = utils_xml.get_icons_texture(patch_sec)
+        local x1, y1, x2, y2 = utils_xml.get_item_axis(patch_sec, nil, true)
+        self.patch_icon:InitTexture(tex)
+        self.patch_icon:SetTextureRect(Frect():set(x1, y1, x2, y2))
+        local icon_h = 34
+        local icon_w = icon_h * ratio
+        self.patch_icon:SetWndPos(vector2():set(pad_x, 7))
+        self.patch_icon:SetWndSize(vector2():set(icon_w, icon_h))
+        self.patch_icon:Show(true)
+        text_x = pad_x + icon_w + (7 * ratio)
+    else
+        self.patch_icon:Show(false)
+    end
+
+    local is_looted = hcl_main and hcl_main.is_corpse_looted and hcl_main.is_corpse_looted(npc:id()) or false
+    local tag_w = 58 * ratio
+    local right_margin = 5 * ratio
+    if is_looted then
+        self.hcl_tag:SetWndPos(vector2():set(win_w - tag_w - right_margin, 26))
+        self.hcl_tag:SetWndSize(vector2():set(tag_w, 18))
+        self.hcl_tag:SetText(game.translate_string("st_hcl_looted"))
+        self.hcl_tag:Show(true)
+    else
+        self.hcl_tag:Show(false)
+    end
+
+    local title_avail_w = m_max(40, win_w - text_x - pad_x)
+    local rank_avail_w = m_max(40, win_w - text_x - (is_looted and (tag_w + right_margin + 4) or pad_x))
+    local stalker_name = npc:character_name() or ""
+    local comm_label = game.translate_string("st_faction_" .. tostring(comm))
+    if not comm_label or comm_label == ("st_faction_" .. tostring(comm)) then
+        comm_label = game.translate_string(tostring(comm))
+    end
+    self.header_title:SetWndPos(vector2():set(text_x, 6))
+    self.header_title:SetWndSize(vector2():set(title_avail_w, 20))
+    self.header_title:SetText(s_format("%s - %s", tostring(stalker_name), tostring(comm_label)))
+
+    local rank_name = ranks and ranks.get_obj_rank_name and ranks.get_obj_rank_name(npc) or "novice"
+    local rank_label = game.translate_string("st_rank_" .. tostring(rank_name))
+    self.header_rank:SetWndPos(vector2():set(text_x, 26))
+    self.header_rank:SetWndSize(vector2():set(rank_avail_w, 18))
+    self.header_rank:SetText(tostring(rank_label))
+end
+
+---------------------------------------------------------------------------------------
+-- Positions and sizes the main window, header, loot viewport, and footer for total_h.
+-- Arguments: total_h (number) - Desired window height in pixels (clamped to 100..625)
+-- Returns: (number, number, number, number, number) - win_w, loot_x, loot_y, loot_w, loot_h
+---------------------------------------------------------------------------------------
+function HCL_HUD:ApplyLayout(total_h)
+    local ratio = utils_xml.screen_ratio()
+    local win_w = HCL_UI_MAIN_X * ratio
+    local win_h = clamp_val(total_h or HCL_UI_MAIN_Y_MIN, HCL_UI_MAIN_Y_MIN, HCL_UI_MAIN_Y_MAX)
+
+    local x_off = ((hcl_mcm and tonumber(hcl_mcm.get("hcl_x_offset"))) or 150) * ratio
+    local y_off = (hcl_mcm and tonumber(hcl_mcm.get("hcl_y_offset"))) or 0
+    local opacity_pct = clamp_val((hcl_mcm and tonumber(hcl_mcm.get("hcl_ui_opacity"))) or 75, 10, 100)
+    local opacity_scale = opacity_pct / 100.0
+    local alpha = m_floor((opacity_pct * 2.55) + 0.5)
+
+    local pos_x = 512 + x_off
+    local pos_y = clamp_val(384 + y_off - (win_h * 0.5), 8, 760 - win_h)
+
+    self.frame:SetWndPos(vector2():set(pos_x, pos_y))
+    self.frame:SetWndSize(vector2():set(win_w, win_h))
+
+    self.bg:SetWndPos(vector2():set(0, 0))
+    self.bg:SetWndSize(vector2():set(win_w, win_h))
+    self.bg:SetTextureColor(GetARGB(alpha, 0, 0, 0))
+
+    local sep_margin = 5 * ratio
+    local sep_w = m_max(20, win_w - (2 * sep_margin))
+
+    self.header:SetWndPos(vector2():set(0, 0))
+    self.header:SetWndSize(vector2():set(win_w, HCL_HEADER_H))
+    layout_gradient_separator(self.header_sep_segs, sep_margin, HCL_HEADER_H - 1.5, sep_w, 1.5, opacity_scale)
+
+    local loot_x = 6 * ratio
+    local loot_y = HCL_HEADER_H + HCL_LOOT_PAD
+    local loot_w = m_max(64, win_w - (12 * ratio))
+    local loot_h = m_max(20, win_h - HCL_HEADER_H - HCL_FOOTER_H - (2 * HCL_LOOT_PAD))
+
+    self.status_text:SetFont(resolve_active_font("status"))
+    self.status_text:SetWndPos(vector2():set(loot_x, loot_y))
+    self.status_text:SetWndSize(vector2():set(loot_w, loot_h))
+
+    local footer_y = win_h - HCL_FOOTER_H
+    self.footer:SetWndPos(vector2():set(0, footer_y))
+    self.footer:SetWndSize(vector2():set(win_w, HCL_FOOTER_H))
+    layout_gradient_separator(self.footer_sep_segs, sep_margin, 0, sep_w, 1.5, opacity_scale)
+    self.footer_text:SetFont(resolve_active_font("footer"))
+    self.footer_text:SetWndPos(vector2():set(sep_margin, 2))
+    self.footer_text:SetWndSize(vector2():set(sep_w, HCL_FOOTER_H - 3))
+
+    return win_w, loot_x, loot_y, loot_w, loot_h
+end
+
+---------------------------------------------------------------------------------------
+-- Updates the slim scrollbar thumb position and visibility when height exceeds 625 px.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function HCL_HUD:UpdateScrollbar()
+    local cont = self.loot_container
+    local scroll = cont and cont.scroll
+    if not scroll or not cont.prof or not cont.prof:IsShown() then
+        self.sb_track:Show(false)
+        self.sb_thumb:Show(false)
+        return
+    end
+
+    local span = self.max_scroll or 0
+    if span <= 1 or self.frame:GetHeight() < (HCL_UI_MAIN_Y_MAX - 1) then
+        self.sb_track:Show(false)
+        self.sb_thumb:Show(false)
+        return
+    end
+
+    local ratio = utils_xml.screen_ratio()
+    local sb_w = m_max(1.5, 2 * ratio)
+    local prof_pos = cont.prof:GetWndPos()
+    local view_h = self.loot_h or cont.prof:GetHeight()
+    local sb_x = self.frame:GetWidth() - (3.5 * ratio) - sb_w
+    local sb_y = prof_pos.y
+
+    self.sb_track:SetWndPos(vector2():set(sb_x, sb_y))
+    self.sb_track:SetWndSize(vector2():set(sb_w, view_h))
+    self.sb_track:Show(true)
+
+    local total_content_h = m_max(view_h + 1, self.content_h or (view_h + span))
+    local thumb_h = clamp_val(view_h * (view_h / total_content_h), 16, view_h)
+    local cur_pos = clamp_val(self.scroll_pos or scroll:GetCurrentScrollPos() or 0, 0, span)
+    local progress = clamp_val(cur_pos / span, 0.0, 1.0)
+    local thumb_y = sb_y + ((view_h - thumb_h) * progress)
+
+    self.sb_thumb:SetWndPos(vector2():set(sb_x, thumb_y))
+    self.sb_thumb:SetWndSize(vector2():set(sb_w, thumb_h))
+    self.sb_thumb:Show(true)
+end
+
+---------------------------------------------------------------------------------------
+-- Updates target cursor geometry, footer item name, and rolling viewport scroll position.
+-- Uses utils_ui's SetScrollPos(1) calibration trick so CUIScrollView scrolls reliably
+-- whenever the cursor moves above or below the visible 625 px viewport window.
+-- Arguments: snap_immediately (boolean) - If true, snaps cursor without interpolation
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function HCL_HUD:SyncCursorAndViewport(snap_immediately)
+    local cont = self.loot_container
+    if current_ui_state ~= "LOOTING" or not cont or not cont.cell or not hcl_loot then
+        self.cursor_box:Show(false)
+        self.cursor_initialized = false
+        self.footer_text:SetText("")
+        return
+    end
+
+    local _, cur_obj, cell_idx = hcl_loot.get_cursor_params()
+    local ci = cell_idx and cont.cell[cell_idx] or nil
+    if not ci or not ci.cell or not ci.cell:IsShown() then
+        self.cursor_box:Show(false)
+        self.cursor_initialized = false
+        self.footer_text:SetText("")
+        return
+    end
+
+    local pos = ci.cell:GetWndPos()
+    local cw = ci.cell:GetWidth()
+    local ch = ci.cell:GetHeight()
+
+    self.target_x = pos.x
+    self.target_y = pos.y
+    self.target_w = cw
+    self.target_h = ch
+
+    if snap_immediately or not self.cursor_initialized then
+        self.cur_x = self.target_x
+        self.cur_y = self.target_y
+        self.cur_w = self.target_w
+        self.cur_h = self.target_h
+        self.cursor_initialized = true
+        self.last_interp_tg = time_global()
+    end
+
+    self.cursor_box:SetWndPos(vector2():set(self.cur_x, self.cur_y))
+    self.cursor_box:SetWndSize(vector2():set(self.cur_w, self.cur_h))
+    if hcl_mcm and hcl_mcm.get_cursor_argb then
+        self.cursor_box:SetTextureColor(hcl_mcm.get_cursor_argb(115))
+    end
+    self.cursor_box:Show(true)
+
+    local scroll = cont.scroll
+    local max_scroll = self.max_scroll or 0
+    if scroll and cont.prof and max_scroll > 1 then
+        local view_h = self.loot_h or cont.prof:GetHeight()
+        local cur_scroll = self.scroll_pos or scroll:GetCurrentScrollPos() or 0
+        local cell_top = pos.y
+        local cell_bot = pos.y + ch
+        local new_scroll = cur_scroll
+
+        if cell_top < cur_scroll then
+            new_scroll = clamp_val(m_floor(cell_top - 2), 0, m_floor(max_scroll))
+        elseif cell_bot > (cur_scroll + view_h) then
+            new_scroll = clamp_val(m_floor(cell_bot - view_h + 4), 0, m_floor(max_scroll))
+        end
+
+        if new_scroll ~= cur_scroll or snap_immediately then
+            self.scroll_pos = new_scroll
+            cont.scroll_pos = new_scroll
+            scroll:SetScrollPos(1)
+            scroll:SetScrollPos(new_scroll)
+        end
+    end
+    self:UpdateScrollbar()
+
+    local full_name = ""
+    if cur_obj then
+        full_name = (ui_item and ui_item.get_obj_name and ui_item.get_obj_name(cur_obj))
+            or (ui_item and ui_item.get_sec_name and ui_item.get_sec_name(cur_obj:section()))
+            or tostring(cur_obj:section())
+    elseif ci.section then
+        full_name = (ui_item and ui_item.get_sec_name and ui_item.get_sec_name(ci.section)) or tostring(ci.section)
+    end
+    self.footer_text:SetText(tostring(full_name))
+end
+
+---------------------------------------------------------------------------------------
+-- Per-frame CUI update interpolating cursor position/size with a smooth gradient step
+-- and evaluating falling-edge mouse button release triggers at full frame rate.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function HCL_HUD:Update()
+    CUIScriptWnd.Update(self)
+    if current_ui_state == "LOOTING" and hcl_loot and hcl_loot.process_mouse_release_edges then
+        hcl_loot.process_mouse_release_edges(false, false)
+    end
+    if current_ui_state ~= "LOOTING" or not self.cursor_initialized or not self.cursor_box:IsShown() then
+        return
+    end
+
+    local now_tg = time_global()
+    local dt = m_max(1, m_min(100, now_tg - (self.last_interp_tg or now_tg)))
+    self.last_interp_tg = now_tg
+
+    local t = 1.0 - m_exp(-dt * 0.028)
+    self.cur_x = self.cur_x + ((self.target_x - self.cur_x) * t)
+    self.cur_y = self.cur_y + ((self.target_y - self.cur_y) * t)
+    self.cur_w = self.cur_w + ((self.target_w - self.cur_w) * t)
+    self.cur_h = self.cur_h + ((self.target_h - self.cur_h) * t)
+
+    self.cursor_box:SetWndPos(vector2():set(self.cur_x, self.cur_y))
+    self.cursor_box:SetWndSize(vector2():set(self.cur_w, self.cur_h))
+
+    if hcl_mcm and hcl_mcm.get_cursor_argb then
+        local dist = m_abs(self.target_x - self.cur_x) + m_abs(self.target_y - self.cur_y)
+        local br_pct = clamp_val(tonumber(hcl_mcm.get("hcl_bg_scolor_brightness")) or 75, 1, 100) / 100.0
+        local base_a = m_floor((110 * br_pct) + 25)
+        local move_boost = m_min(45, m_floor(dist * 0.6))
+        self.cursor_box:SetTextureColor(hcl_mcm.get_cursor_argb(clamp_val(base_a + move_boost, 25, 220)))
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Renders CLAIMED (<CLAIMED> bright yellow) or EMPTY (<EMPTY> pale white) state window.
+-- Arguments: npc (game_object) - Hovered dead stalker object
+--            mode (string) - 'CLAIMED' or 'EMPTY'
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function HCL_HUD:RenderStatusOverlay(npc, mode)
+    local win_w = self:ApplyLayout(HCL_UI_MAIN_Y_MIN)
+    self:PopulateHeader(npc, win_w)
+
+    if self.loot_container and self.loot_container.prof then
+        self.loot_container.prof:Show(false)
+    end
+    self.cursor_box:Show(false)
+    self.cursor_initialized = false
+    self.content_h = 0
+    self.loot_h = 0
+    self.max_scroll = 0
+    self.scroll_pos = 0
+    self.sb_track:Show(false)
+    self.sb_thumb:Show(false)
+    self.footer_text:SetText("")
+
+    if mode == "CLAIMED" then
+        self.status_text:SetTextColor(GetARGB(255, 255, 225, 35))
+        self.status_text:SetText("<" .. game.translate_string("st_hcl_claimed") .. ">")
+    else
+        self.status_text:SetTextColor(GetARGB(220, 225, 230, 235))
+        self.status_text:SetText("<" .. game.translate_string("st_hcl_empty") .. ">")
+    end
+    self.status_text:Show(true)
+    self:ShowHud()
+end
+
+---------------------------------------------------------------------------------------
+-- Renders PREVIEW or LOOTING state by populating UICellContainer with corpse items.
+-- Calibrates CUIScrollView range via SetScrollPos(1) and self-adjusts cont.st height
+-- so rolling viewport scrolling and scrollbar tracking work seamlessly above 625 px.
+-- Arguments: npc (game_object) - Hovered dead stalker object
+--            objects_map (table) - Sparse {[item_id] = game_object} map
+--            is_looting (boolean) - True for LOOTING state, false for PREVIEW state
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function HCL_HUD:RenderLootGrid(npc, objects_map, is_looting)
+    self:ShowHud()
+
+    local win_w, loot_x, loot_y, loot_w, loot_h = self:ApplyLayout(HCL_UI_MAIN_Y_MAX)
+    self:PopulateHeader(npc, win_w)
+    self.status_text:Show(false)
+
+    local cont = self.loot_container
+    if cont and cont.prof then
+        local prev_scroll = self.scroll_pos or (cont.scroll and cont.scroll:GetCurrentScrollPos()) or 0
+        cont.prof:Show(true)
+        cont:AdjustWnd(loot_x, loot_y, loot_w, loot_h)
+        cont:SetGridSpecs()
+
+        reinit_container_with_overlay_masks(cont, objects_map)
+
+        local content_h = m_max(43, cont:Scroll_GetHeight(0) or 0)
+        local desired_h = HCL_HEADER_H + HCL_FOOTER_H + (2 * HCL_LOOT_PAD) + content_h
+        local final_h = clamp_val(desired_h, HCL_UI_MAIN_Y_MIN, HCL_UI_MAIN_Y_MAX)
+
+        _, loot_x, loot_y, loot_w, loot_h = self:ApplyLayout(final_h)
+        cont:AdjustWnd(loot_x, loot_y, loot_w, loot_h)
+
+        self.content_h = content_h
+        self.loot_h = loot_h
+        self.max_scroll = m_max(0, content_h - loot_h)
+
+        if cont.scroll and cont.st then
+            cont.scroll:Clear()
+            local st_h = (self.max_scroll > 0) and (self.max_scroll + 4) or 1
+            cont.st:SetWndSize(vector2():set(cont.scroll:GetWidth(), st_h))
+            cont.scroll:AddWindow(cont.st, true)
+            cont.st:SetAutoDelete(false)
+            -- Force C++ CUIScrollView to recalculate scroll range (utils_ui Scroll_SetPos trick)
+            cont.scroll:SetScrollPos(1)
+            local target_s = (self.max_scroll > 0) and clamp_val(m_floor(prev_scroll), 0, m_floor(self.max_scroll)) or 0
+            cont.scroll:SetScrollPos(target_s)
+            cont.scroll_pos = target_s
+            self.scroll_pos = target_s
+        end
+        if cont.pad then
+            cont.pad:Show(false)
+        end
+    end
+
+    if hcl_loot and hcl_loot.sync_grid_from_container then
+        hcl_loot.sync_grid_from_container(cont, objects_map)
+    end
+
+    if is_looting then
+        self:SyncCursorAndViewport(not self.cursor_initialized)
+    else
+        self.cursor_box:Show(false)
+        self.cursor_initialized = false
+        self.footer_text:SetText("")
+        self:UpdateScrollbar()
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Attaches the HCL_HUD dialog to the X-Ray player HUD if not already attached.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function HCL_HUD:ShowHud()
+    local hud = get_hud and get_hud()
+    if not hud then return end
+    if not self.is_attached then
+        hud:AddDialogToRender(self)
+        self.is_attached = true
+    end
+    self:Show(true)
+end
+
+---------------------------------------------------------------------------------------
+-- Detaches and hides the HCL_HUD dialog from the X-Ray player HUD.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function HCL_HUD:HideHud()
+    self:Show(false)
+    self.cursor_initialized = false
+    if self.is_attached then
+        local hud = get_hud and get_hud()
+        if hud then
+            hud:RemoveDialogToRender(self)
+        end
+        self.is_attached = false
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Lazily retrieves or creates the singleton HCL_HUD dialog instance.
+-- Arguments: none
+-- Returns: (HCL_HUD) - Singleton HUD dialog instance
+---------------------------------------------------------------------------------------
+local function get_hud_instance()
+    if not hud_instance then
+        hud_instance = HCL_HUD()
+    end
+    return hud_instance
+end
+
+---------------------------------------------------------------------------------------
+-- Evaluates HCL_UI top-down priority (HIDDEN -> CLAIMED -> EMPTY -> PREVIEW -> LOOTING).
+-- Arguments: corpse_status (string) - Output of HCL_Main ('INVALID'|'CLAIMED'|'VALID')
+--            cb_status (string) - Output of HCL_Main ('IDLE'|'PENDING'|'PREVIEW'|'LOOT')
+--            npc (game_object|nil) - Hovered dead stalker object
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function tick(corpse_status, cb_status, npc)
+    -- Priority 1: HIDDEN (corpse_check_status = INVALID or delay timer still pending)
+    if corpse_status == "INVALID" or not npc or (corpse_status == "VALID" and cb_status ~= "PREVIEW" and cb_status ~= "LOOT") then
+        if current_ui_state ~= "HIDDEN" then
+            if hud_instance then
+                hud_instance:HideHud()
+            end
+            current_ui_state = "HIDDEN"
+            rendered_corpse_id = nil
+            rendered_inv_hash = nil
+            ui_dirty = false
+            z_probe(3, "HCL_UI", "Transition -> HIDDEN")
+        end
+        return
+    end
+
+    local npc_id = npc:id()
+
+    -- Priority 2: CLAIMED
+    if corpse_status == "CLAIMED" then
+        if current_ui_state ~= "CLAIMED" or rendered_corpse_id ~= npc_id or ui_dirty then
+            local hud = get_hud_instance()
+            current_ui_state = "CLAIMED"
+            hud:RenderStatusOverlay(npc, "CLAIMED")
+            rendered_corpse_id = npc_id
+            rendered_inv_hash = nil
+            ui_dirty = false
+            z_probe(2, "HCL_UI", "Transition -> CLAIMED (corpse_id=%d)", npc_id)
+        end
+        return
+    end
+
+    local inv_hash, item_count, objects_map = "0:0:0", 0, {}
+    if hcl_loot and hcl_loot.scan_corpse_inventory then
+        inv_hash, item_count, objects_map = hcl_loot.scan_corpse_inventory(npc)
+    end
+
+    -- Priority 3: EMPTY (VALID and (PREVIEW or LOOT) and corpse is empty)
+    if item_count == 0 then
+        if current_ui_state ~= "EMPTY" or rendered_corpse_id ~= npc_id or rendered_inv_hash ~= inv_hash or ui_dirty then
+            local hud = get_hud_instance()
+            current_ui_state = "EMPTY"
+            hud:RenderStatusOverlay(npc, "EMPTY")
+            if hcl_loot and hcl_loot.sync_grid_from_container then
+                hcl_loot.sync_grid_from_container(nil, {})
+            end
+            rendered_corpse_id = npc_id
+            rendered_inv_hash = inv_hash
+            ui_dirty = false
+            z_probe(2, "HCL_UI", "Transition -> EMPTY (corpse_id=%d)", npc_id)
+        end
+        return
+    end
+
+    -- Priority 4: PREVIEW
+    if cb_status == "PREVIEW" then
+        if current_ui_state ~= "PREVIEW" or rendered_corpse_id ~= npc_id or rendered_inv_hash ~= inv_hash or ui_dirty then
+            local hud = get_hud_instance()
+            current_ui_state = "PREVIEW"
+            hud:RenderLootGrid(npc, objects_map, false)
+            rendered_corpse_id = npc_id
+            rendered_inv_hash = inv_hash
+            ui_dirty = false
+            z_probe(2, "HCL_UI", "Transition -> PREVIEW (corpse_id=%d, items=%d)", npc_id, item_count)
+        end
+        return
+    end
+
+    -- Priority 5: LOOTING
+    if cb_status == "LOOT" then
+        local hud = get_hud_instance()
+        local state_changed = (current_ui_state ~= "LOOTING")
+        if state_changed or rendered_corpse_id ~= npc_id or rendered_inv_hash ~= inv_hash or ui_dirty then
+            current_ui_state = "LOOTING"
+            hud:RenderLootGrid(npc, objects_map, true)
+            rendered_corpse_id = npc_id
+            rendered_inv_hash = inv_hash
+            ui_dirty = false
+            z_probe(2, "HCL_UI", "Transition -> LOOTING (corpse_id=%d, items=%d)", npc_id, item_count)
+        end
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Marks the Hover UI dirty so the next tick or immediate refresh rebuilds the grid.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function mark_dirty()
+    ui_dirty = true
+end
+
+---------------------------------------------------------------------------------------
+-- Immediately re-evaluates HCL_UI state and refreshes the active HUD window.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function refresh_now()
+    ui_dirty = true
+    if hcl_main and hcl_main.get_state then
+        local c_stat, cb_stat, npc = hcl_main.get_state()
+        tick(c_stat, cb_stat, npc)
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Updates the cursor target position and footer label when cursor_idx moves in LOOTING.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function on_cursor_moved()
+    if hud_instance and current_ui_state == "LOOTING" then
+        hud_instance:SyncCursorAndViewport(false)
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Marks the Hover UI dirty when an item is taken or spawned on the hovered corpse.
+-- Arguments: npc (game_object) - NPC whose inventory changed
+--            item (game_object) - Item taken or dropped
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function on_npc_inventory_change(npc, item)
+    if npc and rendered_corpse_id and npc:id() == rendered_corpse_id then
+        ui_dirty = true
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Cleans up the singleton HCL_HUD instance when the actor is destroyed.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function actor_on_net_destroy()
+    if hud_instance then
+        hud_instance:HideHud()
+        hud_instance = nil
+    end
+    current_ui_state = "HIDDEN"
+    rendered_corpse_id = nil
+    rendered_inv_hash = nil
+    ui_dirty = false
+end
+
+---------------------------------------------------------------------------------------
+-- Registers HCL_UI callbacks at game start.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function on_game_start()
+    RegisterScriptCallback("npc_on_item_take", on_npc_inventory_change)
+    RegisterScriptCallback("npc_on_item_drop", on_npc_inventory_change)
+    RegisterScriptCallback("on_option_change", mark_dirty)
+    RegisterScriptCallback("actor_on_net_destroy", actor_on_net_destroy)
+    z_probe(2, "HCL_UI", "HCL_UI renderer initialized")
+end

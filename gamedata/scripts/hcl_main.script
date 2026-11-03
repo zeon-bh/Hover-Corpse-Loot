@@ -1,5 +1,4 @@
-local Z_DEBUG_LEVEL = 2 -- 0=OFF, 1=ERROR, 2=WARN/STATE, 3=VERBOSE
-local SCRIPT_NAME = "hcl_main"
+local debug_level = 2 -- 0=OFF, 1=ERROR, 2=WARN/STATE, 3=VERBOSE
 
 ---------------------------------------------------------------------------------------
 -- Outputs formatted chokepoint diagnostic telemetry to the X-Ray console log.
@@ -10,10 +9,19 @@ local SCRIPT_NAME = "hcl_main"
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
 local function z_probe(level, station, msg, ...)
-    if not Z_DEBUG_LEVEL or level > Z_DEBUG_LEVEL then return end
-    local formatted = (select("#", ...) > 0) and string.format(tostring(msg), ...) or tostring(msg)
-    printf("[%s] | %s | %s", SCRIPT_NAME, tostring(station), formatted)
+    if level > debug_level then return end
+    local ok, formatted = pcall(string.format, msg, ...)
+    printf("[Hover Corpse Loot] | %s | %s", tostring(station), ok and formatted or tostring(msg))
 end
+
+-- [SYSTEM] HCL_Main
+
+local corpse_check_status = "INVALID"
+local callback_status = "IDLE"
+local hovered_corpse = nil
+local hovered_corpse_id = nil
+
+local looted_corpses = {}
 
 -- [SYSTEM] HCL_CorpseCheck
 
@@ -23,28 +31,12 @@ local cached_ray = nil
 local cached_ray_dist = nil
 local cached_ray_actor_id = nil
 
-local current_corpse_status = "INVALID"
-local current_corpse_id = nil
-
----------------------------------------------------------------------------------------
--- Clamps a numeric value between a minimum and maximum bound.
--- Arguments: val (number) - Input number
---            min_v (number) - Lower bound
---            max_v (number) - Upper bound
--- Returns: (number) - Clamped value
----------------------------------------------------------------------------------------
-local function clamp_val(val, min_v, max_v)
-    if val < min_v then return min_v end
-    if val > max_v then return max_v end
-    return val
-end
-
 ---------------------------------------------------------------------------------------
 -- Checks whether any conflicting fullscreen UI or inventory mode is currently open.
 -- Arguments: none
 -- Returns: (boolean) - True if the main HUD is free for Hover Corpse Loot display
 ---------------------------------------------------------------------------------------
-local function is_hud_ready()
+function is_hud_ready()
     if not db.actor then return false end
     if not main_hud_shown() then return false end
     if actor_menu and actor_menu.get_last_mode and actor_menu.get_last_mode() ~= 0 then
@@ -77,66 +69,41 @@ local function get_or_create_ray(max_dist)
 end
 
 ---------------------------------------------------------------------------------------
--- Evaluates whether a dead stalker corpse is claimed by a live NPC under G.A.M.M.A.
+-- Evaluates read-only whether a dead stalker corpse is claimed by a live NPC in GAMMA.
 -- Arguments: npc (game_object) - Target dead stalker game object
---            mode (string) - 'peek' for read-only hover check, 'use' for direct loot action
--- Returns: (string) - 'CLAIMED' if locked by another live stalker, otherwise 'VALID'
+-- Returns: (boolean) - True if the corpse is claimed by a live stalker, false otherwise
 ---------------------------------------------------------------------------------------
-function evaluate_claim(npc, mode)
-    if not npc then return "INVALID" end
-    if not grok_loot_claim then
-        return "VALID"
-    end
-
+function is_corpse_claimed(npc)
+    if not npc then return false end
     local id = npc:id()
-    if grok_loot_claim.looted and grok_loot_claim.looted[id] then
-        return "CLAIMED"
+
+    local m_data = alife_storage_manager and alife_storage_manager.get_state and alife_storage_manager.get_state() or nil
+    local complete_looted = (m_data and m_data.Complete_looted) or (grok_loot_claim and grok_loot_claim.looted)
+    if complete_looted and complete_looted[id] then
+        return true
     end
 
-    local killer_id = grok_loot_claim.claimed and grok_loot_claim.claimed[id]
+    local claimed_map = (m_data and m_data.claimed_loot) or (grok_loot_claim and grok_loot_claim.claimed)
+    local killer_id = claimed_map and claimed_map[id]
     if killer_id then
-        local killer = level.object_by_id(killer_id)
-        if killer and killer:alive() and IsStalker(killer) then
-            if mode == "use" and db.actor then
-                local dist = killer:position():distance_to(db.actor:position())
-                if dist > 25 then
-                    if grok_loot_claim.looted then
-                        grok_loot_claim.looted[id] = true
-                    end
-                    if actor_menu and actor_menu.set_msg then
-                        actor_menu.set_msg(1, game.translate_string("st_npc_loot_claim_far"), 5)
-                    end
-                elseif dynamic_news_helper and dynamic_news_helper.send_tip then
-                    local msg_key = "st_npc_loot_claim_" .. tostring(math.random(1, 4))
-                    dynamic_news_helper.send_tip(
-                        game.translate_string(msg_key),
-                        killer:character_name(),
-                        nil,
-                        nil,
-                        killer:character_icon(),
-                        nil,
-                        "npc"
-                    )
-                end
-            end
-            return "CLAIMED"
+        local sender = level.object_by_id(killer_id)
+        if sender and sender:alive() and IsStalker(sender) then
+            return true
         end
     end
-
-    return "VALID"
+    return false
 end
 
 ---------------------------------------------------------------------------------------
--- Probes the player crosshair ray for a valid dead stalker corpse within max distance.
+-- Evaluates HCL_CorpseCheck states (Invalid -> Claimed -> Valid) via 50ms raycast.
 -- Arguments: none
--- Returns: (string, game_object|nil) - CorpseCheckStatus ('INVALID'|'VALID'|'CLAIMED') and object
+-- Returns: (string, game_object|nil) - Evaluated corpse_check_status and hovered_corpse
 ---------------------------------------------------------------------------------------
-local function probe_hovered_corpse()
-    if not hcl_mcm or not hcl_mcm.get("hcl_toggle") then
-        return "INVALID", nil
-    end
-    if not is_hud_ready() then
-        return "INVALID", nil
+local function update_corpse_check()
+    if not hcl_mcm or not hcl_mcm.get("hcl_toggle") or not is_hud_ready() then
+        corpse_check_status = "INVALID"
+        hovered_corpse = nil
+        return corpse_check_status, nil
     end
 
     local max_dist = tonumber(hcl_mcm.get("hcl_max_dist")) or 2
@@ -145,49 +112,60 @@ local function probe_hovered_corpse()
 
     if ray then
         local res = ray:get(device().cam_pos, device().cam_dir)
-        obj = res and res.object or nil
-    end
-
-    -- Fallback to engine target object when geometry_ray misses ragdoll bone colliders.
-    if not obj and level and level.get_target_obj then
-        local fallback_obj = level.get_target_obj()
-        if fallback_obj and db.actor then
-            local dist = fallback_obj:position():distance_to(db.actor:position())
-            if dist <= max_dist then
-                obj = fallback_obj
-            end
+        if res and res.distance and res.distance <= max_dist then
+            obj = res.object
         end
     end
 
-    if not obj then
-        return "INVALID", nil
+    if not obj and level and level.get_target_obj then
+        local fallback_obj = level.get_target_obj()
+        if fallback_obj and db.actor and fallback_obj:position():distance_to(db.actor:position()) <= max_dist then
+            obj = fallback_obj
+        end
     end
 
-    -- Verify target is a dead human stalker (IsStalker excludes mutants) within range.
-    if not IsStalker(obj) or obj:alive() then
-        return "INVALID", nil
+    -- State 1: Invalid
+    if not obj or not IsStalker(obj) or obj:alive() then
+        corpse_check_status = "INVALID"
+        hovered_corpse = nil
+        return corpse_check_status, nil
     end
     if db.actor and obj:position():distance_to(db.actor:position()) > max_dist then
-        return "INVALID", nil
+        corpse_check_status = "INVALID"
+        hovered_corpse = nil
+        return corpse_check_status, nil
     end
 
-    local claim_status = evaluate_claim(obj, "peek")
-    return claim_status, obj
+    hovered_corpse = obj
+
+    -- State 2: Claimed
+    if is_corpse_claimed(obj) then
+        corpse_check_status = "CLAIMED"
+        return corpse_check_status, obj
+    end
+
+    -- State 3: Valid
+    corpse_check_status = "VALID"
+    return corpse_check_status, obj
 end
 
 -- [SYSTEM] HCL_CallbackTrigger
+
+local interaction_unlocked = false
+local timer_completed = false
+local active_corpse_id = nil
+local timer_start_tg = 0
+local timer_running = false
 
 local hcl_suppress_loot_ui = false
 local ui_inventory_patched = false
 local orig_ui_inventory_npc_on_use = nil
 
-local corpse_pipeline_done = {}
-local hover_timer_corpse_id = nil
-local hover_timer_start_tg = 0
-local callback_status = "IDLE"
+local corpse_phase1_done = {}
+local corpse_phase2_done = {}
 
 ---------------------------------------------------------------------------------------
--- Replacement wrapper for UIInventory.npc_on_use that suppresses the loot window during HCL.
+-- Replacement wrapper for UIInventory.npc_on_use that blocks vanilla loot UI during HCL.
 -- Arguments: self (UIInventory) - Active UIInventory instance
 --            obj (game_object) - Used NPC object
 --            who (game_object) - Initiating actor object
@@ -203,7 +181,7 @@ local function wrapped_ui_inventory_npc_on_use(self, obj, who)
 end
 
 ---------------------------------------------------------------------------------------
--- Installs the scoped UIInventory.npc_on_use wrapper once at game start.
+-- Installs the scoped UIInventory.npc_on_use suppressor once at game start.
 -- Arguments: none
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
@@ -215,6 +193,29 @@ local function install_loot_ui_suppressor()
         ui_inventory_patched = true
         z_probe(2, "HCL_CallbackTrigger", "Installed scoped UIInventory.npc_on_use suppressor")
     end
+end
+
+---------------------------------------------------------------------------------------
+-- Executes Phase 1 (PREPARE) item-generation callbacks once for a valid corpse.
+-- Arguments: npc (game_object) - Target dead stalker object
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function run_phase1_item_generation(npc)
+    if not npc or not db.actor then return end
+    local id = npc:id()
+    if corpse_phase1_done[id] then return end
+    corpse_phase1_done[id] = true
+
+    local npc_name = npc:name()
+    if not se_load_var(id, npc_name, "death_dropped") then
+        if death_manager and death_manager.create_release_item then
+            death_manager.create_release_item(npc)
+        end
+        if guaranteed_loot and guaranteed_loot.npc_on_use then
+            pcall(guaranteed_loot.npc_on_use, npc, db.actor)
+        end
+    end
+    z_probe(2, "HCL_CallbackTrigger", "Phase 1 (PREPARE) item generation completed for corpse ID %d", id)
 end
 
 ---------------------------------------------------------------------------------------
@@ -230,810 +231,204 @@ local function trigger_fdda_scavenger_bonus()
 end
 
 ---------------------------------------------------------------------------------------
--- Executes the dead-body use pipeline once per corpse ID while suppressing the loot UI.
--- Arguments: npc (game_object) - Valid dead stalker object
--- Returns: (boolean) - True if pipeline completed or was already executed for this corpse
+-- Executes Phase 2 (LOOT) non-item callbacks (money, faction, stashes/notes) once.
+-- Arguments: npc (game_object) - Target dead stalker object
+-- Returns: (nil)
 ---------------------------------------------------------------------------------------
-function run_corpse_use_pipeline(npc)
-    if not npc or not db.actor then return false end
+local function run_phase2_non_item_callbacks(npc)
+    if not npc or not db.actor then return end
     local id = npc:id()
-    if corpse_pipeline_done[id] then
-        return true
-    end
-    corpse_pipeline_done[id] = true
+    if corpse_phase2_done[id] then return end
+    corpse_phase2_done[id] = true
 
-    local npc_name = npc:name()
-    if not se_load_var(id, npc_name, "death_dropped") then
-        if death_manager and death_manager.create_release_item then
-            death_manager.create_release_item(npc)
-        end
-        if item_money and item_money.actor_on_loot_money then
-            item_money.actor_on_loot_money(npc)
-        end
-    end
+    run_phase1_item_generation(npc)
 
+    if item_money and item_money.actor_on_loot_money then
+        pcall(item_money.actor_on_loot_money, npc)
+    end
     if character_community then
         SendScriptCallback("actor_on_interaction", "factions", nil, character_community(npc))
     end
 
-    -- Suppress UIInventory.npc_on_use synchronously while firing npc_on_use for all other listeners.
     hcl_suppress_loot_ui = true
     local ok, err = pcall(SendScriptCallback, "npc_on_use", npc, db.actor)
     hcl_suppress_loot_ui = false
     if not ok then
-        z_probe(1, "HCL_CallbackTrigger", "Error during npc_on_use dispatch on corpse %d: %s", id, tostring(err))
+        z_probe(1, "HCL_CallbackTrigger", "Error during Phase 2 npc_on_use on corpse %d: %s", id, tostring(err))
     end
 
     if liz_fdda_redone_body_search and liz_fdda_redone_body_search.haruka_scavanger_effect then
-        CreateTimeEvent("hcl_fdda_scav", "scav_" .. tostring(id), 0.15, trigger_fdda_scavenger_bonus)
+        CreateTimeEvent("hcl_fdda_scav", "scav_" .. tostring(id), 0.12, trigger_fdda_scavenger_bonus)
     end
-
-    z_probe(2, "HCL_CallbackTrigger", "Completed corpse use pipeline for corpse ID %d (%s)", id, tostring(npc_name))
-    return true
+    z_probe(2, "HCL_CallbackTrigger", "Phase 2 (LOOT) non-item callbacks released for corpse ID %d", id)
 end
 
 ---------------------------------------------------------------------------------------
--- Advances the hover delay timer for a VALID corpse and fires the use pipeline on expiry.
--- Arguments: status (string) - Current CorpseCheckStatus
+-- Evaluates HCL_CallbackTrigger top-down state priority (IDLE -> LOOT -> PREVIEW -> PREPARE).
+-- Arguments: status (string) - Current corpse_check_status
 --            npc (game_object|nil) - Currently hovered corpse object
 --            now_tg (number) - Current time_global() timestamp in ms
--- Returns: (string) - CallbackStatus ('GREEN' when ready, 'WAITING' or 'IDLE' otherwise)
+-- Returns: (string) - Evaluated callback_status ('IDLE'|'PENDING'|'PREVIEW'|'LOOT')
 ---------------------------------------------------------------------------------------
 local function update_callback_trigger(status, npc, now_tg)
-    if status ~= "VALID" or not npc then
-        hover_timer_corpse_id = nil
-        hover_timer_start_tg = 0
+    local npc_id = npc and npc:id() or nil
+
+    -- Priority 1: IDLE (not hovering a VALID corpse or target corpse changed)
+    if status ~= "VALID" or not npc or (active_corpse_id ~= nil and active_corpse_id ~= npc_id) then
+        timer_running = false
+        timer_completed = false
+        interaction_unlocked = false
+        timer_start_tg = 0
         callback_status = "IDLE"
-        return callback_status
+        if status ~= "VALID" or not npc then
+            active_corpse_id = nil
+            return callback_status
+        end
+        active_corpse_id = npc_id
     end
 
-    local id = npc:id()
-    if hover_timer_corpse_id ~= id then
-        hover_timer_corpse_id = id
-        hover_timer_start_tg = now_tg
-        callback_status = "WAITING"
-    end
-
-    if callback_status == "GREEN" then
-        return callback_status
+    if active_corpse_id == nil then
+        active_corpse_id = npc_id
     end
 
     local delay_ms = (hcl_mcm and tonumber(hcl_mcm.get("hcl_ui_delay"))) or 200
-    if (now_tg - hover_timer_start_tg) >= delay_ms then
-        run_corpse_use_pipeline(npc)
-        callback_status = "GREEN"
+    if timer_running and not timer_completed and (now_tg - timer_start_tg) >= delay_ms then
+        timer_completed = true
+        timer_running = false
     end
 
+    -- Priority 2: LOOT (interaction unlocked via mouse wheel)
+    if interaction_unlocked then
+        run_phase2_non_item_callbacks(npc)
+        callback_status = "LOOT"
+        return callback_status
+    end
+
+    -- Priority 3: PREVIEW (delay timer completed)
+    if timer_completed then
+        callback_status = "PREVIEW"
+        return callback_status
+    end
+
+    -- Priority 4: PREPARE (delay timer not completed; start once and run item generation)
+    if not timer_running then
+        timer_running = true
+        timer_start_tg = now_tg
+        run_phase1_item_generation(npc)
+    end
+    callback_status = "PENDING"
     return callback_status
 end
 
--- [SYSTEM] HCL_UI
-
-local HCL_MAIN_UI_X = 350
-local HCL_MAIN_UI_Y_MIN = 300
-local HCL_MAIN_UI_Y_MAX = 500
-local HCL_HEADER_H = 50
-local HCL_FOOTER_H = 25
-local HCL_LOOT_PAD = 6
-
-local hcl_loot = {
-    corpse_id = nil,
-    items = {},
-    order = {},
-    objects = {},
-}
-
-local temp_collect_objects = nil
-local temp_collect_sections = nil
-local active_sort_objects = nil
-
-local hud_instance = nil
-local current_ui_state = "INVALID"
-local rendered_corpse_id = nil
-local loot_dirty = false
-
 ---------------------------------------------------------------------------------------
--- Callback passed to npc:iterate_inventory to collect lootable corpse items.
--- Arguments: owner (game_object) - Corpse inventory owner
---            item (game_object) - Inventory item object
--- Returns: (nil)
+-- Unlocks corpse interaction on mouse wheel scroll in PREVIEW and transitions to LOOT.
+-- Arguments: none
+-- Returns: (boolean) - True if transitioned to LOOT, false otherwise
 ---------------------------------------------------------------------------------------
-local function collect_corpse_item_cb(owner, item)
-    if not item then return end
-    local sec = item:section()
-    if not sec or sec == "bolt" or sec == "device_pda" or sec == "device_torch" then
-        return
-    end
-    if SYS_GetParam(1, sec, "quest_item", false) then
-        return
-    end
-    local id = item:id()
-    temp_collect_objects[id] = item
-    temp_collect_sections[id] = sec
-end
-
----------------------------------------------------------------------------------------
--- Strict weak ordering comparator for sorting corpse item IDs by kind via utils_ui.
--- Arguments: a (number) - First item object ID
---            b (number) - Second item object ID
--- Returns: (boolean) - True if item a precedes item b
----------------------------------------------------------------------------------------
-local function compare_items_by_kind(a, b)
-    if a == b then return false end
-    if utils_ui and utils_ui.sort_by_kind and active_sort_objects then
-        local ab = utils_ui.sort_by_kind(active_sort_objects, a, b)
-        local ba = utils_ui.sort_by_kind(active_sort_objects, b, a)
-        if ab ~= ba then
-            return ab == true
-        end
-    end
-    return a < b
-end
-
----------------------------------------------------------------------------------------
--- Populates the decoupled hcl_loot model from a corpse's inventory sorted by kind.
--- Arguments: npc (game_object) - Target dead stalker object
--- Returns: (table, table) - Map of {[id]=game_object} and ordered array of item IDs
----------------------------------------------------------------------------------------
-local function collect_and_sort_corpse_loot(npc)
-    temp_collect_objects = {}
-    temp_collect_sections = {}
-    if npc then
-        npc:iterate_inventory(collect_corpse_item_cb, npc)
-    end
-
-    local order = {}
-    local n = 0
-    for item_id, _ in pairs(temp_collect_objects) do
-        n = n + 1
-        order[n] = item_id
-    end
-
-    active_sort_objects = temp_collect_objects
-    if n > 1 then
-        table.sort(order, compare_items_by_kind)
-    end
-    active_sort_objects = nil
-
-    hcl_loot.corpse_id = npc and npc:id() or nil
-    hcl_loot.items = temp_collect_sections
-    hcl_loot.order = order
-    hcl_loot.objects = temp_collect_objects
-
-    temp_collect_objects = nil
-    temp_collect_sections = nil
-
-    return hcl_loot.objects, hcl_loot.order
-end
-
----------------------------------------------------------------------------------------
--- Reserved public hook for future direct item transfer from the Hover Corpse Loot UI.
--- Arguments: item_id (number) - Game object ID of the item to transfer to the actor
--- Returns: (boolean) - True if the item was transferred, false otherwise
----------------------------------------------------------------------------------------
-function take_item(item_id)
-    if not item_id or not hcl_loot.corpse_id or not db.actor then
+function unlock_interaction()
+    if corpse_check_status ~= "VALID" or not hovered_corpse then
         return false
     end
-    local npc = level.object_by_id(hcl_loot.corpse_id)
-    if not npc or npc:alive() then
+    if not timer_completed then
         return false
     end
-    if evaluate_claim(npc, "use") == "CLAIMED" then
-        return false
+    if not interaction_unlocked then
+        interaction_unlocked = true
+        run_phase2_non_item_callbacks(hovered_corpse)
+        callback_status = "LOOT"
+        z_probe(2, "HCL_CallbackTrigger", "Interaction unlocked via mouse wheel -> LOOT (corpse ID %d)", hovered_corpse:id())
     end
-    run_corpse_use_pipeline(npc)
-    local item = level.object_by_id(item_id)
-    if not item or not item:parent() or item:parent():id() ~= npc:id() then
-        return false
-    end
-    npc:transfer_item(item, db.actor)
-    hcl_loot.items[item_id] = nil
-    hcl_loot.objects[item_id] = nil
-    loot_dirty = true
     return true
 end
 
 ---------------------------------------------------------------------------------------
--- Instance override for UICellContainer:GetDeferredEnabled to force immediate HUD cell draw.
--- Arguments: self (UICellContainer) - Loot cell container instance
--- Returns: (boolean) - Always false so Inventory Antifreeze does not defer cell creation
+-- Marks a corpse as looted by the player for the [LOOTED] header tag.
+-- Arguments: corpse_id (number) - Game object ID of the looted corpse
+-- Returns: (nil)
 ---------------------------------------------------------------------------------------
-local function container_disable_deferred(self)
+function mark_corpse_looted(corpse_id)
+    if not corpse_id then return end
+    looted_corpses[corpse_id] = true
+    if se_save_var then
+        pcall(se_save_var, corpse_id, nil, "hcl_looted", true)
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Checks whether a corpse has been looted by the player during this session or saved state.
+-- Arguments: corpse_id (number) - Game object ID of the corpse
+-- Returns: (boolean) - True if the player has looted the corpse
+---------------------------------------------------------------------------------------
+function is_corpse_looted(corpse_id)
+    if not corpse_id then return false end
+    if looted_corpses[corpse_id] then return true end
+    if se_load_var and se_load_var(corpse_id, nil, "hcl_looted") then
+        looted_corpses[corpse_id] = true
+        return true
+    end
     return false
 end
 
 ---------------------------------------------------------------------------------------
--- Temporarily masks Utjan z_item_icon_info settings with HCL MCM toggles around Reinit.
--- Arguments: container (UICellContainer) - Target cell container
---            objects (table) - Sparse map of {[item_id] = game_object}
--- Returns: (nil)
----------------------------------------------------------------------------------------
-local function reinit_container_with_overlay_masks(container, objects)
-    if not container then return end
-
-    local z_settings = z_item_icon_info and z_item_icon_info.settings
-    local saved = nil
-
-    if z_settings and hcl_mcm then
-        saved = {}
-        if not hcl_mcm.get("hcl_cond") and z_settings.cond_text then
-            saved.cond_enable = z_settings.cond_text.enable
-            z_settings.cond_text.enable = false
-        end
-        if not hcl_mcm.get("hcl_parts_cond") and z_settings.part_dots then
-            saved.parts_enable = z_settings.part_dots.enable
-            z_settings.part_dots.enable = false
-        end
-        if not hcl_mcm.get("hcl_parts_repair_type") then
-            if z_settings.wpn_info then
-                saved.show_gun_repair_type = z_settings.wpn_info.show_gun_repair_type
-                z_settings.wpn_info.show_gun_repair_type = false
-            end
-            if z_settings.armor_info then
-                saved.show_armor_type = z_settings.armor_info.show_armor_type
-                saved.show_helmet_type = z_settings.armor_info.show_helmet_type
-                z_settings.armor_info.show_armor_type = false
-                z_settings.armor_info.show_helmet_type = false
-            end
-        end
-        if not hcl_mcm.get("hcl_patches_on_armor") and z_settings.armor_info then
-            saved.show_patch = z_settings.armor_info.show_patch
-            z_settings.armor_info.show_patch = false
-        end
-    end
-
-    local ok, err = pcall(container.Reinit, container, objects)
-
-    if saved and z_settings then
-        if saved.cond_enable ~= nil and z_settings.cond_text then
-            z_settings.cond_text.enable = saved.cond_enable
-        end
-        if saved.parts_enable ~= nil and z_settings.part_dots then
-            z_settings.part_dots.enable = saved.parts_enable
-        end
-        if saved.show_gun_repair_type ~= nil and z_settings.wpn_info then
-            z_settings.wpn_info.show_gun_repair_type = saved.show_gun_repair_type
-        end
-        if z_settings.armor_info then
-            if saved.show_armor_type ~= nil then
-                z_settings.armor_info.show_armor_type = saved.show_armor_type
-            end
-            if saved.show_helmet_type ~= nil then
-                z_settings.armor_info.show_helmet_type = saved.show_helmet_type
-            end
-            if saved.show_patch ~= nil then
-                z_settings.armor_info.show_patch = saved.show_patch
-            end
-        end
-    end
-
-    if not ok then
-        z_probe(1, "HCL_UI", "UICellContainer:Reinit error: %s", tostring(err))
-        return
-    end
-
-    -- Tag active cells with their primary item_id for future hover-looting hooks.
-    if container.indx_id and container.cell then
-        for item_id, cell_idx in pairs(container.indx_id) do
-            local cell = container.cell[cell_idx]
-            if cell then
-                cell.hcl_item_id = item_id
-            end
-        end
-    end
-end
-
-class "HCL_HUD" (CUIScriptWnd)
-
----------------------------------------------------------------------------------------
--- Initializes the Hover Corpse Loot HUD window and all child widgets once.
+-- Returns the current public [output] contract of HCL_Main.
 -- Arguments: none
--- Returns: (nil)
+-- Returns: (string, string, game_object|nil) - corpse_check_status, callback_status, hovered_corpse
 ---------------------------------------------------------------------------------------
-function HCL_HUD:__init() super()
-    self.xml = CScriptXmlInit()
-    self.xml:ParseFile("ui_hcl.xml")
-    self.is_attached = false
-    self:InitControls()
+function get_state()
+    return corpse_check_status, callback_status, hovered_corpse
 end
 
 ---------------------------------------------------------------------------------------
--- Destructor for HCL_HUD.
+-- Returns the current corpse_check_status ('INVALID' | 'CLAIMED' | 'VALID').
 -- Arguments: none
--- Returns: (nil)
+-- Returns: (string) - Current corpse check status
 ---------------------------------------------------------------------------------------
-function HCL_HUD:__finalize()
+function get_corpse_check_status()
+    return corpse_check_status
 end
 
 ---------------------------------------------------------------------------------------
--- Allocates the static background, header, UICellContainer, custom scrollbar, and footer.
+-- Returns the current callback_status ('IDLE' | 'PENDING' | 'PREVIEW' | 'LOOT').
 -- Arguments: none
--- Returns: (nil)
+-- Returns: (string) - Current callback trigger status
 ---------------------------------------------------------------------------------------
-function HCL_HUD:InitControls()
-    self:SetWndRect(Frect():set(0, 0, 1024, 768))
-    self:SetAutoDelete(true)
-
-    self.frame = CUIWindow()
-    self.frame:SetAutoDelete(true)
-    self:AttachChild(self.frame)
-
-    -- AMOLED black background static with adjustable opacity.
-    self.bg = CUIStatic()
-    self.bg:SetAutoDelete(true)
-    self.bg:InitTexture("ui\\hcl_white")
-    self.bg:SetStretchTexture(true)
-    self.frame:AttachChild(self.bg)
-
-    -- Header container (50 px height at top of hcl_main).
-    self.header = CUIWindow()
-    self.header:SetAutoDelete(true)
-    self.frame:AttachChild(self.header)
-
-    self.patch_icon = CUIStatic()
-    self.patch_icon:SetAutoDelete(true)
-    self.patch_icon:SetStretchTexture(true)
-    self.header:AttachChild(self.patch_icon)
-
-    self.header_title = CUITextWnd()
-    self.header_title:SetAutoDelete(true)
-    self.header_title:SetFont(GetFontLetterica18Russian())
-    self.header_title:SetTextColor(GetARGB(255, 235, 235, 235))
-    self.header_title:SetTextAlignment(0)
-    self.header_title:SetVTextAlignment(1)
-    self.header:AttachChild(self.header_title)
-
-    self.header_rank = CUITextWnd()
-    self.header_rank:SetAutoDelete(true)
-    self.header_rank:SetFont(GetFontLetterica16Russian())
-    self.header_rank:SetTextColor(GetARGB(200, 170, 175, 180))
-    self.header_rank:SetTextAlignment(0)
-    self.header_rank:SetVTextAlignment(1)
-    self.header:AttachChild(self.header_rank)
-
-    self.header_sep = CUIStatic()
-    self.header_sep:SetAutoDelete(true)
-    self.header_sep:InitTexture("ui\\hcl_sep")
-    self.header_sep:SetStretchTexture(true)
-    self.header:AttachChild(self.header_sep)
-
-    -- Loot cell container (delegates icons, stacking, and Utjan overlays to utils_ui).
-    self.loot_container = utils_ui.UICellContainer("hcl_loot", self, nil, "hcl_loot_prof", self.frame)
-    self.loot_container.sort_method = "kind"
-    self.loot_container.showcase = false
-    self.loot_container.can_select = false
-    self.loot_container.disable_drag = true
-    self.loot_container.disable_highlight = true
-    self.loot_container.disable_info = true
-    self.loot_container.disable_bar = false
-    self.loot_container.GetDeferredEnabled = container_disable_deferred
-    if self.loot_container.pad then
-        self.loot_container.pad:Show(false)
-    end
-
-    -- Centered bright yellow <CLAIMED> text for claimed corpses.
-    self.claimed_text = CUITextWnd()
-    self.claimed_text:SetAutoDelete(true)
-    self.claimed_text:SetFont(GetFontLetterica18Russian())
-    self.claimed_text:SetTextColor(GetARGB(255, 255, 225, 35))
-    self.claimed_text:SetTextAlignment(2)
-    self.claimed_text:SetVTextAlignment(1)
-    self.claimed_text:SetText("<" .. game.translate_string("st_hcl_claimed") .. ">")
-    self.claimed_text:Show(false)
-    self.frame:AttachChild(self.claimed_text)
-
-    -- Custom sleek 2px scrollbar track and thumb.
-    self.sb_track = CUIStatic()
-    self.sb_track:SetAutoDelete(true)
-    self.sb_track:InitTexture("ui\\hcl_white")
-    self.sb_track:SetStretchTexture(true)
-    self.sb_track:SetTextureColor(GetARGB(45, 200, 205, 210))
-    self.sb_track:Show(false)
-    self.frame:AttachChild(self.sb_track)
-
-    self.sb_thumb = CUIStatic()
-    self.sb_thumb:SetAutoDelete(true)
-    self.sb_thumb:InitTexture("ui\\hcl_white")
-    self.sb_thumb:SetStretchTexture(true)
-    self.sb_thumb:SetTextureColor(GetARGB(185, 225, 230, 235))
-    self.sb_thumb:Show(false)
-    self.frame:AttachChild(self.sb_thumb)
-
-    -- Footer bar (25 px height at bottom of hcl_main).
-    self.footer = CUIWindow()
-    self.footer:SetAutoDelete(true)
-    self.frame:AttachChild(self.footer)
-
-    self.footer_sep = CUIStatic()
-    self.footer_sep:SetAutoDelete(true)
-    self.footer_sep:InitTexture("ui\\hcl_sep")
-    self.footer_sep:SetStretchTexture(true)
-    self.footer:AttachChild(self.footer_sep)
-
-    self.footer_text = CUITextWnd()
-    self.footer_text:SetAutoDelete(true)
-    self.footer_text:SetFont(GetFontSmall())
-    self.footer_text:SetTextColor(GetARGB(160, 155, 160, 165))
-    self.footer_text:SetTextAlignment(2)
-    self.footer_text:SetVTextAlignment(1)
-    self.footer_text:SetText(game.translate_string("st_hcl_footer_placeholder"))
-    self.footer:AttachChild(self.footer_text)
+function get_callback_status()
+    return callback_status
 end
 
 ---------------------------------------------------------------------------------------
--- Populates the header faction patch, 'Name - Faction' title, and rank subtext.
--- Arguments: npc (game_object) - Hovered dead stalker object
---            win_w (number) - Aspect-corrected window width in UI coordinates
--- Returns: (nil)
----------------------------------------------------------------------------------------
-function HCL_HUD:PopulateHeader(npc, win_w)
-    if not npc then return end
-    local ratio = utils_xml.screen_ratio()
-    local pad_x = 10 * ratio
-    local text_x = pad_x
-
-    local comm = character_community and character_community(npc) or "stalker"
-    local patch_sec = comm .. "_patch"
-
-    if comm ~= "trader" and ini_sys and ini_sys:section_exist(patch_sec) then
-        local tex = utils_xml.get_icons_texture(patch_sec)
-        local x1, y1, x2, y2 = utils_xml.get_item_axis(patch_sec, nil, true)
-        self.patch_icon:InitTexture(tex)
-        self.patch_icon:SetTextureRect(Frect():set(x1, y1, x2, y2))
-        local icon_h = 34
-        local icon_w = icon_h * ratio
-        self.patch_icon:SetWndPos(vector2():set(pad_x, 7))
-        self.patch_icon:SetWndSize(vector2():set(icon_w, icon_h))
-        self.patch_icon:Show(true)
-        text_x = pad_x + icon_w + (8 * ratio)
-    else
-        self.patch_icon:Show(false)
-    end
-
-    local stalker_name = npc:character_name() or ""
-    local comm_label = game.translate_string("st_faction_" .. tostring(comm))
-    if not comm_label or comm_label == ("st_faction_" .. tostring(comm)) then
-        comm_label = game.translate_string(tostring(comm))
-    end
-    self.header_title:SetWndPos(vector2():set(text_x, 6))
-    self.header_title:SetWndSize(vector2():set(math.max(40, win_w - text_x - pad_x), 20))
-    self.header_title:SetText(string.format("%s - %s", tostring(stalker_name), tostring(comm_label)))
-
-    local rank_name = ranks and ranks.get_obj_rank_name and ranks.get_obj_rank_name(npc) or "novice"
-    local rank_label = game.translate_string("st_rank_" .. tostring(rank_name))
-    self.header_rank:SetWndPos(vector2():set(text_x, 26))
-    self.header_rank:SetWndSize(vector2():set(math.max(40, win_w - text_x - pad_x), 18))
-    self.header_rank:SetText(tostring(rank_label))
-end
-
----------------------------------------------------------------------------------------
--- Positions and sizes the main window, header, loot viewport, and footer for a given height.
--- Arguments: total_h (number) - Clamped window height in pixels (300..500)
--- Returns: (number, number, number, number) - win_w, loot_x, loot_y, loot_w, loot_h
----------------------------------------------------------------------------------------
-function HCL_HUD:ApplyLayout(total_h)
-    local ratio = utils_xml.screen_ratio()
-    local win_w = HCL_MAIN_UI_X * ratio
-    local win_h = clamp_val(total_h or HCL_MAIN_UI_Y_MIN, HCL_MAIN_UI_Y_MIN, HCL_MAIN_UI_Y_MAX)
-
-    local x_off = ((hcl_mcm and tonumber(hcl_mcm.get("hcl_x_offset"))) or 150) * ratio
-    local y_off = (hcl_mcm and tonumber(hcl_mcm.get("hcl_y_offset"))) or 0
-    local opacity_pct = clamp_val((hcl_mcm and tonumber(hcl_mcm.get("hcl_ui_opacity"))) or 75, 10, 100)
-    local alpha = math.floor((opacity_pct * 2.55) + 0.5)
-
-    -- Center vertically on crosshair + y_offset so scaling pushes Header and Footer equally.
-    local pos_x = 512 + x_off
-    local pos_y = clamp_val(384 + y_off - (win_h * 0.5), 8, 760 - win_h)
-
-    self.frame:SetWndPos(vector2():set(pos_x, pos_y))
-    self.frame:SetWndSize(vector2():set(win_w, win_h))
-
-    self.bg:SetWndPos(vector2():set(0, 0))
-    self.bg:SetWndSize(vector2():set(win_w, win_h))
-    self.bg:SetTextureColor(GetARGB(alpha, 0, 0, 0))
-
-    local sep_margin = 6 * ratio
-    local sep_w = math.max(16, win_w - (2 * sep_margin))
-
-    self.header:SetWndPos(vector2():set(0, 0))
-    self.header:SetWndSize(vector2():set(win_w, HCL_HEADER_H))
-    self.header_sep:SetWndPos(vector2():set(sep_margin, HCL_HEADER_H - 2))
-    self.header_sep:SetWndSize(vector2():set(sep_w, 2))
-
-    local loot_x = 8 * ratio
-    local loot_y = HCL_HEADER_H + HCL_LOOT_PAD
-    local loot_w = math.max(64, win_w - (16 * ratio))
-    local loot_h = math.max(64, win_h - HCL_HEADER_H - HCL_FOOTER_H - (2 * HCL_LOOT_PAD))
-
-    self.claimed_text:SetWndPos(vector2():set(loot_x, loot_y))
-    self.claimed_text:SetWndSize(vector2():set(loot_w, loot_h))
-
-    local footer_y = win_h - HCL_FOOTER_H
-    self.footer:SetWndPos(vector2():set(0, footer_y))
-    self.footer:SetWndSize(vector2():set(win_w, HCL_FOOTER_H))
-    self.footer_sep:SetWndPos(vector2():set(sep_margin, 0))
-    self.footer_sep:SetWndSize(vector2():set(sep_w, 2))
-    self.footer_text:SetWndPos(vector2():set(sep_margin, 2))
-    self.footer_text:SetWndSize(vector2():set(sep_w, HCL_FOOTER_H - 3))
-
-    return win_w, loot_x, loot_y, loot_w, loot_h
-end
-
----------------------------------------------------------------------------------------
--- Updates the custom 2px scrollbar thumb position and visibility based on scroll bounds.
+-- Returns the currently hovered dead stalker game_object or nil.
 -- Arguments: none
--- Returns: (nil)
+-- Returns: (game_object|nil) - Hovered corpse object
 ---------------------------------------------------------------------------------------
-function HCL_HUD:UpdateScrollbar()
-    local cont = self.loot_container
-    local scroll = cont and cont.scroll
-    if not scroll or not cont.prof or not cont.prof:IsShown() then
-        self.sb_track:Show(false)
-        self.sb_thumb:Show(false)
-        return
-    end
-
-    local min_pos = scroll:GetMinScrollPos()
-    local max_pos = scroll:GetMaxScrollPos()
-    local span = max_pos - min_pos
-    if span <= 1 then
-        self.sb_track:Show(false)
-        self.sb_thumb:Show(false)
-        return
-    end
-
-    local ratio = utils_xml.screen_ratio()
-    local sb_w = math.max(1.5, 2 * ratio)
-    local prof_pos = cont.prof:GetWndPos()
-    local view_h = cont.prof:GetHeight()
-    local sb_x = self.frame:GetWidth() - (4 * ratio) - sb_w
-    local sb_y = prof_pos.y
-
-    self.sb_track:SetWndPos(vector2():set(sb_x, sb_y))
-    self.sb_track:SetWndSize(vector2():set(sb_w, view_h))
-    self.sb_track:Show(true)
-
-    local total_content_h = view_h + span
-    local thumb_h = clamp_val(view_h * (view_h / total_content_h), 18, view_h)
-    local cur_pos = clamp_val(scroll:GetCurrentScrollPos(), min_pos, max_pos)
-    local progress = (cur_pos - min_pos) / span
-    local thumb_y = sb_y + ((view_h - thumb_h) * progress)
-
-    self.sb_thumb:SetWndPos(vector2():set(sb_x, thumb_y))
-    self.sb_thumb:SetWndSize(vector2():set(sb_w, thumb_h))
-    self.sb_thumb:Show(true)
+function get_hovered_corpse()
+    return hovered_corpse
 end
 
 ---------------------------------------------------------------------------------------
--- Renders the CLAIMED state with header and centered yellow <CLAIMED> indicator.
--- Arguments: npc (game_object) - Claimed dead stalker object
--- Returns: (nil)
----------------------------------------------------------------------------------------
-function HCL_HUD:RenderClaimed(npc)
-    local win_w = self:ApplyLayout(HCL_MAIN_UI_Y_MIN)
-    self:PopulateHeader(npc, win_w)
-
-    if self.loot_container and self.loot_container.prof then
-        self.loot_container.prof:Show(false)
-    end
-    self.sb_track:Show(false)
-    self.sb_thumb:Show(false)
-    self.claimed_text:Show(true)
-    self:ShowHud()
-end
-
----------------------------------------------------------------------------------------
--- Renders the VALID state by populating UICellContainer with sorted corpse items.
--- Arguments: npc (game_object) - Valid dead stalker object
--- Returns: (nil)
----------------------------------------------------------------------------------------
-function HCL_HUD:RenderValid(npc)
-    local win_w, loot_x, loot_y, loot_w, loot_h = self:ApplyLayout(HCL_MAIN_UI_Y_MIN)
-    self:PopulateHeader(npc, win_w)
-    self.claimed_text:Show(false)
-
-    local cont = self.loot_container
-    if cont and cont.prof then
-        cont.prof:Show(true)
-        -- Pre-set container width and grid specs before Reinit so 350px column count is exact.
-        cont:AdjustWnd(loot_x, loot_y, loot_w, loot_h)
-        cont:SetGridSpecs()
-
-        local objects = collect_and_sort_corpse_loot(npc)
-        reinit_container_with_overlay_masks(cont, objects)
-
-        local content_h = cont:Scroll_GetHeight(1) or 0
-        local desired_h = HCL_HEADER_H + HCL_FOOTER_H + (2 * HCL_LOOT_PAD) + content_h
-        local final_h = clamp_val(desired_h, HCL_MAIN_UI_Y_MIN, HCL_MAIN_UI_Y_MAX)
-
-        _, loot_x, loot_y, loot_w, loot_h = self:ApplyLayout(final_h)
-        cont:AdjustWnd(loot_x, loot_y, loot_w, loot_h)
-        cont:SetGridSpecs()
-        cont:Scroll_Reinit(false)
-        cont:Scroll_SetPos(0, true)
-        if cont.pad then
-            cont.pad:Show(false)
-        end
-    end
-
-    self:UpdateScrollbar()
-    self:ShowHud()
-end
-
----------------------------------------------------------------------------------------
--- Attaches the HCL_HUD dialog to the X-Ray player HUD if not already attached.
--- Arguments: none
--- Returns: (nil)
----------------------------------------------------------------------------------------
-function HCL_HUD:ShowHud()
-    local hud = get_hud and get_hud()
-    if not hud then return end
-    if not self.is_attached then
-        hud:AddDialogToRender(self)
-        self.is_attached = true
-    end
-    self:Show(true)
-end
-
----------------------------------------------------------------------------------------
--- Detaches and hides the HCL_HUD dialog from the X-Ray player HUD.
--- Arguments: none
--- Returns: (nil)
----------------------------------------------------------------------------------------
-function HCL_HUD:HideHud()
-    self:Show(false)
-    if self.is_attached then
-        local hud = get_hud and get_hud()
-        if hud then
-            hud:RemoveDialogToRender(self)
-        end
-        self.is_attached = false
-    end
-end
-
----------------------------------------------------------------------------------------
--- Lazily retrieves or creates the singleton HCL_HUD instance.
--- Arguments: none
--- Returns: (HCL_HUD) - Singleton HUD dialog instance
----------------------------------------------------------------------------------------
-local function get_hud_instance()
-    if not hud_instance then
-        hud_instance = HCL_HUD()
-    end
-    return hud_instance
-end
-
----------------------------------------------------------------------------------------
--- Evaluates HCL_UI state priority (INVALID -> CLAIMED -> VALID) and updates on transition.
--- Arguments: corpse_status (string) - Output of HCL_CorpseCheck ('INVALID'|'CLAIMED'|'VALID')
---            cb_status (string) - Output of HCL_CallbackTrigger ('GREEN'|'WAITING'|'IDLE')
---            npc (game_object|nil) - Hovered dead stalker object
--- Returns: (nil)
----------------------------------------------------------------------------------------
-local function evaluate_ui_state(corpse_status, cb_status, npc)
-    -- State 1: INVALID (or VALID while still waiting for hcl_ui_delay timer)
-    if corpse_status == "INVALID" or not npc or (corpse_status == "VALID" and cb_status ~= "GREEN") then
-        if current_ui_state ~= "INVALID" then
-            if hud_instance then
-                hud_instance:HideHud()
-            end
-            current_ui_state = "INVALID"
-            rendered_corpse_id = nil
-            loot_dirty = false
-            z_probe(3, "HCL_UI", "Transition -> INVALID")
-        end
-        return
-    end
-
-    local npc_id = npc:id()
-
-    -- State 2: CLAIMED
-    if corpse_status == "CLAIMED" then
-        if current_ui_state ~= "CLAIMED" or rendered_corpse_id ~= npc_id or loot_dirty then
-            local hud = get_hud_instance()
-            hud:RenderClaimed(npc)
-            current_ui_state = "CLAIMED"
-            rendered_corpse_id = npc_id
-            loot_dirty = false
-            z_probe(2, "HCL_UI", "Transition -> CLAIMED (corpse_id=%d)", npc_id)
-        end
-        return
-    end
-
-    -- State 3: VALID (requires CallbackStatus == GREEN)
-    if corpse_status == "VALID" and cb_status == "GREEN" then
-        if current_ui_state ~= "VALID" or rendered_corpse_id ~= npc_id or loot_dirty then
-            local hud = get_hud_instance()
-            hud:RenderValid(npc)
-            current_ui_state = "VALID"
-            rendered_corpse_id = npc_id
-            loot_dirty = false
-            z_probe(2, "HCL_UI", "Transition -> VALID (corpse_id=%d, items=%d)", npc_id, #hcl_loot.order)
-        end
-    end
-end
-
--- [SYSTEM] HoverCorpseLoot
-
----------------------------------------------------------------------------------------
--- Handles mouse wheel scrolling of the Hover Corpse Loot viewport when visible.
--- Arguments: dir (number) - Wheel direction (1/positive for up, 0/negative for down)
---            flags (table) - Engine callback flags table (ret_value=false consumes input)
+-- Handles mouse wheel input during PREVIEW state to unlock LOOT mode.
+-- Arguments: dir (number) - Mouse wheel direction
+--            flags (table) - Callback flags table
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
 local function on_mouse_wheel(dir, flags)
-    if current_ui_state ~= "VALID" or not hud_instance or not hud_instance.is_attached then
-        return
-    end
-    if not is_hud_ready() then
-        return
-    end
-    local cont = hud_instance.loot_container
-    local scroll = cont and cont.scroll
-    if not scroll then return end
-
-    local min_pos = scroll:GetMinScrollPos()
-    local max_pos = scroll:GetMaxScrollPos()
-    if (max_pos - min_pos) <= 1 then
-        return
-    end
-
-    local step = (cont.grid_size or 41) + (cont.grid_line or 2)
-    local delta = (dir == 1 or dir > 0) and (-step) or step
-    local cur_pos = scroll:GetCurrentScrollPos()
-    local new_pos = clamp_val(cur_pos + delta, min_pos, max_pos)
-
-    scroll:SetScrollPos(new_pos)
-    hud_instance:UpdateScrollbar()
-
-    if flags then
-        flags.ret_value = false
+    if corpse_check_status == "VALID" and callback_status == "PREVIEW" and hovered_corpse then
+        if unlock_interaction() then
+            if hcl_loot and hcl_loot.on_enter_loot_from_preview then
+                hcl_loot.on_enter_loot_from_preview()
+            end
+            if hcl_ui and hcl_ui.refresh_now then
+                hcl_ui.refresh_now()
+            end
+            if flags then
+                flags.ret_value = false
+            end
+        end
     end
 end
 
 ---------------------------------------------------------------------------------------
--- Marks the active Hover UI dirty if an item is spawned or transferred on the hovered corpse.
--- Arguments: npc (game_object) - NPC whose inventory changed
---            item (game_object) - Item taken or dropped
--- Returns: (nil)
----------------------------------------------------------------------------------------
-local function on_npc_inventory_change(npc, item)
-    if npc and rendered_corpse_id and npc:id() == rendered_corpse_id then
-        loot_dirty = true
-    end
-end
-
----------------------------------------------------------------------------------------
--- Refreshes the Hover UI layout and overlays when MCM options change.
--- Arguments: none
--- Returns: (nil)
----------------------------------------------------------------------------------------
-local function on_option_change()
-    cached_ray = nil
-    if current_ui_state ~= "INVALID" then
-        loot_dirty = true
-    end
-end
-
----------------------------------------------------------------------------------------
--- Cleans up the HUD dialog and session state when the actor is destroyed.
--- Arguments: none
--- Returns: (nil)
----------------------------------------------------------------------------------------
-local function actor_on_net_destroy()
-    if hud_instance then
-        hud_instance:HideHud()
-        hud_instance = nil
-    end
-    cached_ray = nil
-    current_ui_state = "INVALID"
-    rendered_corpse_id = nil
-    corpse_pipeline_done = {}
-end
-
----------------------------------------------------------------------------------------
--- Throttled 50ms actor update tick orchestrating HCL_CorpseCheck, HCL_CallbackTrigger, and HCL_UI.
+-- Throttled 50ms actor update tick orchestrating HCL_CorpseCheck and HCL_CallbackTrigger.
 -- Arguments: none
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
@@ -1044,26 +439,37 @@ local function actor_on_update()
     end
     next_poll_tg = now_tg + POLL_INTERVAL_MS
 
-    local status, npc = probe_hovered_corpse()
-    current_corpse_status = status
-    current_corpse_id = npc and npc:id() or nil
-
+    local status, npc = update_corpse_check()
+    hovered_corpse_id = npc and npc:id() or nil
     local cb_status = update_callback_trigger(status, npc, now_tg)
-    evaluate_ui_state(status, cb_status, npc)
+
+    if hcl_loot and hcl_loot.tick then
+        hcl_loot.tick(status, cb_status, npc)
+    end
+    if hcl_ui and hcl_ui.tick then
+        hcl_ui.tick(status, cb_status, npc)
+    end
 end
 
 ---------------------------------------------------------------------------------------
--- Registers Hover Corpse Loot callbacks and installs the loot UI suppressor at game start.
+-- Resets cached raycast state when MCM options change or actor is destroyed.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function reset_runtime_cache()
+    cached_ray = nil
+end
+
+---------------------------------------------------------------------------------------
+-- Registers HCL_Main callbacks and installs the vanilla loot UI suppressor at game start.
 -- Arguments: none
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
 function on_game_start()
     install_loot_ui_suppressor()
     RegisterScriptCallback("actor_on_update", actor_on_update)
-    RegisterScriptCallback("actor_on_net_destroy", actor_on_net_destroy)
     RegisterScriptCallback("on_mouse_wheel", on_mouse_wheel)
-    RegisterScriptCallback("npc_on_item_take", on_npc_inventory_change)
-    RegisterScriptCallback("npc_on_item_drop", on_npc_inventory_change)
-    RegisterScriptCallback("on_option_change", on_option_change)
-    z_probe(2, "HoverCorpseLoot", "Hover Corpse Loot initialized")
+    RegisterScriptCallback("on_option_change", reset_runtime_cache)
+    RegisterScriptCallback("actor_on_net_destroy", reset_runtime_cache)
+    z_probe(2, "HCL_Main", "HCL_Main event controller initialized")
 end

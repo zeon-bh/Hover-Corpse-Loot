@@ -3,46 +3,89 @@
     <string id="ui_mcm_menu_hcl">
         <text>Hover Corpse Loot</text>
     </string>
+    <string id="ui_mcm_hcl_tab_ui_options">
+        <text>UI Options</text>
+    </string>
+    <string id="ui_mcm_hcl_tab_ui_controls">
+        <text>UI Controls</text>
+    </string>
+    <string id="ui_mcm_menu_ui_options">
+        <text>UI Options</text>
+    </string>
+    <string id="ui_mcm_menu_ui_controls">
+        <text>UI Controls</text>
+    </string>
     <string id="ui_mcm_hcl_title">
         <text>Hover Corpse Loot - UI Options</text>
     </string>
-    <string id="ui_mcm_hcl_hcl_toggle">
+    <string id="ui_mcm_hcl_controls_title">
+        <text>Hover Corpse Loot - UI Controls</text>
+    </string>
+
+    <string id="ui_mcm_hcl_ui_options_hcl_toggle">
         <text>Toggle Hover Corpse Loot</text>
     </string>
-    <string id="ui_mcm_hcl_hcl_cond">
-        <text>Enable/Disable Condition % on Item Icons</text>
+    <string id="ui_mcm_hcl_ui_options_hcl_cond">
+        <text>Toggle Condition % on Item Icons</text>
     </string>
-    <string id="ui_mcm_hcl_hcl_cond_desc">
-        <text>Toggles condition percentage text on item icons in the Hover Corpse Loot window. Under G.A.M.M.A., firearm condition percentage remains hidden by design and weapon part dots indicate condition.</text>
+    <string id="ui_mcm_hcl_ui_options_hcl_parts_cond">
+        <text>Toggle Parts condition dots on Weapons &amp; Armors</text>
     </string>
-    <string id="ui_mcm_hcl_hcl_parts_cond">
-        <text>Enable/Disable Parts condition dots on Weapons &amp; Armors</text>
+    <string id="ui_mcm_hcl_ui_options_hcl_parts_repair_type">
+        <text>Toggle Repair type Icons on Weapons &amp; Armors</text>
     </string>
-    <string id="ui_mcm_hcl_hcl_parts_repair_type">
-        <text>Enable/Disable Repair type Icons on Weapons &amp; Armors</text>
+    <string id="ui_mcm_hcl_ui_options_hcl_patches_on_armor">
+        <text>Toggle Faction patch Icons on Armors</text>
     </string>
-    <string id="ui_mcm_hcl_hcl_patches_on_armor">
-        <text>Enable/Disable Faction patch Icons on Armors</text>
+    <string id="ui_mcm_hcl_ui_options_hcl_x_offset">
+        <text>Hover UI Horizontal Offset from crosshair (OFFSET : X)</text>
     </string>
-    <string id="ui_mcm_hcl_hcl_x_offset">
-        <text>Hover Corpse Loot UI Horizontal Offset from crosshair (OFFSET : X)</text>
+    <string id="ui_mcm_hcl_ui_options_hcl_y_offset">
+        <text>Hover UI Vertical Offset from crosshair (OFFSET : Y)</text>
     </string>
-    <string id="ui_mcm_hcl_hcl_y_offset">
-        <text>Hover Corpse Loot UI Vertical Offset from crosshair (OFFSET : Y)</text>
+    <string id="ui_mcm_hcl_ui_options_hcl_ui_opacity">
+        <text>Adjust the Opacity of the Hover UI Window</text>
     </string>
-    <string id="ui_mcm_hcl_hcl_ui_opacity">
-        <text>Adjust the Opacity of the main Hover UI Window</text>
-    </string>
-    <string id="ui_mcm_hcl_hcl_ui_delay">
+    <string id="ui_mcm_hcl_ui_options_hcl_ui_delay">
         <text>Adjust the delay for Hover Corpse Loot UI to be displayed on HUD</text>
     </string>
-    <string id="ui_mcm_hcl_hcl_max_dist">
+    <string id="ui_mcm_hcl_ui_options_hcl_max_dist">
         <text>Maximum distance from a stalker body to open the Hover UI Window</text>
     </string>
+
+    <string id="ui_mcm_hcl_ui_controls_hcl_bg_scolor">
+        <text>Item icon selection background color</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_controls_hcl_bg_scolor_brightness">
+        <text>Item icon selection color brightness</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_controls_hcl_s_acceleration">
+        <text>Cursor Acceleration</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_controls_hcl_s_acceleration_desc">
+        <text>Clamps the Cursor step speed to mouse scroll wheel speed.\n[DEFAULT = 1.0] 1:1 Cursor to scroll wheel step speed\nEvery value increment increases cursor acceleration by 10%</text>
+    </string>
+
+    <string id="ui_mcm_lst_hcl_amber">
+        <text>Amber</text>
+    </string>
+    <string id="ui_mcm_lst_hcl_cyan">
+        <text>Cyan</text>
+    </string>
+    <string id="ui_mcm_lst_hcl_white">
+        <text>White</text>
+    </string>
+    <string id="ui_mcm_lst_hcl_green">
+        <text>Green</text>
+    </string>
+
     <string id="st_hcl_claimed">
         <text>CLAIMED</text>
     </string>
-    <string id="st_hcl_footer_placeholder">
-        <text>Placeholder Text</text>
+    <string id="st_hcl_empty">
+        <text>EMPTY</text>
+    </string>
+    <string id="st_hcl_looted">
+        <text>[LOOTED]</text>
     </string>
 </string_table>

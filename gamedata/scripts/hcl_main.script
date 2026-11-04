@@ -111,26 +111,45 @@ local function update_corpse_check()
     local obj = nil
 
     if ray then
-        local res = ray:get(device().cam_pos, device().cam_dir)
-        if res and res.distance and res.distance <= max_dist then
-            obj = res.object
+        local cam_pos = device().cam_pos
+        local cam_dir = device().cam_dir
+        -- Reset C++ ray_pick range and ignore_object before each query because ray_pick:query()
+        -- mutates its internal range in-place to the previous hit distance.
+        if ray.ray then
+            if ray.ray.set_range then ray.ray:set_range(max_dist) end
+            if ray.ray.set_ignore_object and db.actor then ray.ray:set_ignore_object(db.actor) end
+        end
+        local res = ray:get(cam_pos, cam_dir)
+        if res and res.object and res.distance and res.distance <= max_dist then
+            if IsStalker(res.object) and not res.object:alive() then
+                obj = res.object
+            elseif ray.ray and ray.ray.set_ignore_object then
+                -- If the ray hit a dropped weapon/item lying on top of a corpse, retry once ignoring it
+                ray.ray:set_ignore_object(res.object)
+                if ray.ray.set_range then ray.ray:set_range(max_dist) end
+                local res2 = ray:get(cam_pos, cam_dir)
+                if db.actor then ray.ray:set_ignore_object(db.actor) end
+                if res2 and res2.object and res2.distance and res2.distance <= max_dist and IsStalker(res2.object) and not res2.object:alive() then
+                    obj = res2.object
+                end
+            end
         end
     end
 
     if not obj and level and level.get_target_obj then
         local fallback_obj = level.get_target_obj()
-        if fallback_obj and db.actor and fallback_obj:position():distance_to(db.actor:position()) <= max_dist then
-            obj = fallback_obj
+        if fallback_obj and IsStalker(fallback_obj) and not fallback_obj:alive() then
+            local t_dist = (level.get_target_dist and level.get_target_dist())
+                or (db.actor and fallback_obj:position():distance_to(db.actor:position()))
+                or 999
+            if t_dist <= max_dist or (db.actor and fallback_obj:position():distance_to(db.actor:position()) <= max_dist) then
+                obj = fallback_obj
+            end
         end
     end
 
     -- State 1: Invalid
     if not obj or not IsStalker(obj) or obj:alive() then
-        corpse_check_status = "INVALID"
-        hovered_corpse = nil
-        return corpse_check_status, nil
-    end
-    if db.actor and obj:position():distance_to(db.actor:position()) > max_dist then
         corpse_check_status = "INVALID"
         hovered_corpse = nil
         return corpse_check_status, nil

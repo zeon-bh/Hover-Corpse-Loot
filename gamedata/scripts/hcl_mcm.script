@@ -25,12 +25,14 @@ local DEFAULTS = {
     hcl_patches_on_armor     = true,
     hcl_x_offset             = 150,
     hcl_y_offset             = 0,
+    hcl_ui_main_x            = 300,
     hcl_ui_opacity           = 75,
     hcl_ui_delay             = 200,
     hcl_max_dist             = 2,
     hcl_bg_scolor            = "Amber",
     hcl_bg_scolor_brightness = 75,
     hcl_s_acceleration       = 1.0,
+    hcl_univ_modifier        = (DIK_keys and DIK_keys.DIK_LMENU) or 56,
 }
 
 local OPTION_PATHS = {
@@ -41,12 +43,14 @@ local OPTION_PATHS = {
     hcl_patches_on_armor     = "hcl/ui_options/hcl_patches_on_armor",
     hcl_x_offset             = "hcl/ui_options/hcl_x_offset",
     hcl_y_offset             = "hcl/ui_options/hcl_y_offset",
+    hcl_ui_main_x            = "hcl/ui_options/hcl_ui_main_x",
     hcl_ui_opacity           = "hcl/ui_options/hcl_ui_opacity",
     hcl_ui_delay             = "hcl/ui_options/hcl_ui_delay",
     hcl_max_dist             = "hcl/ui_options/hcl_max_dist",
     hcl_bg_scolor            = "hcl/ui_controls/hcl_bg_scolor",
     hcl_bg_scolor_brightness = "hcl/ui_controls/hcl_bg_scolor_brightness",
     hcl_s_acceleration       = "hcl/ui_controls/hcl_s_acceleration",
+    hcl_univ_modifier        = "hcl/ui_controls/hcl_univ_modifier",
 }
 
 local COLOR_PRESETS = {
@@ -82,15 +86,17 @@ local function refresh_settings_cache()
             settings_cache[opt_id] = def_val
         end
     end
-    z_probe(2, "HCL_MCM", "Settings cache refreshed (toggle=%s, x=%s, y=%s, opacity=%s, delay=%s, dist=%s, color=%s, accel=%s)",
+    z_probe(2, "HCL_MCM", "Settings cache refreshed (toggle=%s, x=%s, y=%s, win_x=%s, opacity=%s, delay=%s, dist=%s, color=%s, accel=%s, mod=%s)",
         tostring(settings_cache.hcl_toggle),
         tostring(settings_cache.hcl_x_offset),
         tostring(settings_cache.hcl_y_offset),
+        tostring(settings_cache.hcl_ui_main_x),
         tostring(settings_cache.hcl_ui_opacity),
         tostring(settings_cache.hcl_ui_delay),
         tostring(settings_cache.hcl_max_dist),
         tostring(settings_cache.hcl_bg_scolor),
-        tostring(settings_cache.hcl_s_acceleration))
+        tostring(settings_cache.hcl_s_acceleration),
+        tostring(settings_cache.hcl_univ_modifier))
 end
 
 ---------------------------------------------------------------------------------------
@@ -184,6 +190,7 @@ function on_mcm_load()
                     { id = "divider_sliders", type = "line" },
                     { id = "hcl_x_offset", type = "track", val = 2, min = 0, max = 500, step = 5, def = DEFAULTS.hcl_x_offset },
                     { id = "hcl_y_offset", type = "track", val = 2, min = 0, max = 250, step = 5, def = DEFAULTS.hcl_y_offset },
+                    { id = "hcl_ui_main_x", type = "track", val = 2, min = 200, max = 500, step = 10, def = DEFAULTS.hcl_ui_main_x },
                     { id = "hcl_ui_opacity", type = "track", val = 2, min = 10, max = 100, step = 1, def = DEFAULTS.hcl_ui_opacity },
                     { id = "hcl_ui_delay", type = "track", val = 2, min = 100, max = 500, step = 10, def = DEFAULTS.hcl_ui_delay },
                     { id = "hcl_max_dist", type = "track", val = 2, min = 2, max = 5, step = 0.5, def = DEFAULTS.hcl_max_dist },
@@ -209,7 +216,8 @@ function on_mcm_load()
                         },
                     },
                     { id = "hcl_bg_scolor_brightness", type = "track", val = 2, min = 1, max = 100, step = 1, def = DEFAULTS.hcl_bg_scolor_brightness },
-                    { id = "hcl_s_acceleration", type = "track", val = 2, min = 1.0, max = 2.0, step = 0.1, def = DEFAULTS.hcl_s_acceleration },
+                    { id = "hcl_s_acceleration", type = "track", val = 2, min = 1.0, max = 5.0, step = 0.1, def = DEFAULTS.hcl_s_acceleration },
+                    { id = "hcl_univ_modifier", type = "key_bind", val = 2, def = DEFAULTS.hcl_univ_modifier },
                 },
             },
         },

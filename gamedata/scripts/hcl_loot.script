@@ -95,20 +95,61 @@ local function is_item_id_blacklisted(id)
 end
 
 ---------------------------------------------------------------------------------------
--- Checks whether either Left Alt or Right Alt modifier key is currently held.
+-- Resolves the configured Universal Modifier Key DIK code from HCL_MCM (default LALT).
+-- Guards against negative (-1) or zero MCM key_bind values so key_state() never reads
+-- out-of-bounds CInput memory.
 -- Arguments: none
--- Returns: (boolean) - True if LALT or RALT is pressed
+-- Returns: (number, boolean) - Valid positive DIK key code and true if bound to LALT/RALT
 ---------------------------------------------------------------------------------------
-local function is_alt_pressed()
-    if ui_mcm and ui_mcm.get_mod_key then
-        if ui_mcm.get_mod_key(3) then
-            return true
-        end
-    end
-    if key_state then
+local function get_configured_modifier_dik()
+    local lalt = DIK_keys and DIK_keys.DIK_LMENU or 56
+    local ralt = DIK_keys and DIK_keys.DIK_RMENU or 184
+    local raw_dik = hcl_mcm and tonumber(hcl_mcm.get("hcl_univ_modifier")) or nil
+    local mod_dik = (raw_dik and raw_dik > 0) and m_floor(raw_dik) or lalt
+    local is_default_alt = (mod_dik == lalt or mod_dik == ralt)
+    return mod_dik, is_default_alt
+end
+
+---------------------------------------------------------------------------------------
+-- Checks whether a given DIK key code matches the configured Universal Modifier Key.
+-- Arguments: key (number|nil) - Input DIK key code
+-- Returns: (boolean) - True if key matches hcl_univ_modifier
+---------------------------------------------------------------------------------------
+local function is_modifier_key_code(key)
+    if not key or key <= 0 then return false end
+    local mod_dik, is_default_alt = get_configured_modifier_dik()
+    if is_default_alt then
         local lalt = DIK_keys and DIK_keys.DIK_LMENU or 56
         local ralt = DIK_keys and DIK_keys.DIK_RMENU or 184
-        if (key_state(lalt) ~= 0) or (key_state(ralt) ~= 0) then
+        return (key == lalt or key == ralt)
+    end
+    return (key == mod_dik)
+end
+
+---------------------------------------------------------------------------------------
+-- Checks whether the configured Universal Modifier Key (hcl_univ_modifier) is held.
+-- Uses real-time CInput key_state() as the authoritative source of truth and clears
+-- sticky alt_modifier latches (e.g. after Alt+Tab focus switches) when physically up.
+-- Arguments: none
+-- Returns: (boolean) - True if the universal modifier key is physically held down
+---------------------------------------------------------------------------------------
+local function is_alt_pressed()
+    local mod_dik, is_default_alt = get_configured_modifier_dik()
+    if key_state then
+        if is_default_alt then
+            local lalt = DIK_keys and DIK_keys.DIK_LMENU or 56
+            local ralt = DIK_keys and DIK_keys.DIK_RMENU or 184
+            local down = (key_state(lalt) ~= 0) or (key_state(ralt) ~= 0)
+            alt_modifier = down
+            return down
+        elseif mod_dik and mod_dik > 0 then
+            local down = (key_state(mod_dik) ~= 0)
+            alt_modifier = down
+            return down
+        end
+    end
+    if is_default_alt and ui_mcm and ui_mcm.get_mod_key then
+        if ui_mcm.get_mod_key(3) then
             return true
         end
     end
@@ -263,6 +304,15 @@ function sync_grid_from_container(container, objects_map)
                 local ry = ci.area.y or 1
                 local rx = ci.area.x or idx
                 local cw = ci.area.w or (ci.section and SYS_GetParam(2, ci.section, "inv_grid_width", 1)) or 1
+                local stack_ids = { ci.ID }
+                if type(ci.childs) == "table" then
+                    for child_id, _ in pairs(ci.childs) do
+                        local cid = tonumber(child_id)
+                        if cid and cid ~= ci.ID and not is_item_id_blacklisted(cid) then
+                            stack_ids[#stack_ids + 1] = cid
+                        end
+                    end
+                end
                 if not row_buckets[ry] then
                     row_buckets[ry] = {}
                     row_keys[#row_keys + 1] = ry
@@ -270,6 +320,7 @@ function sync_grid_from_container(container, objects_map)
                 row_buckets[ry][#row_buckets[ry] + 1] = {
                     cell_idx   = idx,
                     item_id    = ci.ID,
+                    stack_ids  = stack_ids,
                     section    = ci.section,
                     col_x      = rx,
                     col_start  = rx,
@@ -540,6 +591,35 @@ local function transfer_single_item_to_actor(item_obj)
     return true
 end
 
+---------------------------------------------------------------------------------------
+-- Transfers an entire stacked cell (primary item plus all ci.childs stack siblings)
+-- from the hovered corpse to the player's inventory in a single operation.
+-- Arguments: entry (table|nil) - Grid cell metadata entry containing stack_ids
+--            fallback_obj (game_object|nil) - Fallback item object if stack_ids absent
+-- Returns: (boolean) - True if at least one item in the stack was transferred
+---------------------------------------------------------------------------------------
+local function transfer_cell_stack_to_actor(entry, fallback_obj)
+    local moved_any = false
+    if entry and type(entry.stack_ids) == "table" and #entry.stack_ids > 0 then
+        for i = 1, #entry.stack_ids do
+            local sid = entry.stack_ids[i]
+            if sid and not is_item_id_blacklisted(sid) then
+                local live_obj = level.object_by_id(sid)
+                if live_obj and transfer_single_item_to_actor(live_obj) then
+                    moved_any = true
+                else
+                    blacklist_corpse_item_id(sid)
+                end
+            end
+        end
+        return moved_any
+    end
+    if fallback_obj then
+        return transfer_single_item_to_actor(fallback_obj)
+    end
+    return false
+end
+
 local loot_all_buffer = {}
 
 ---------------------------------------------------------------------------------------
@@ -594,8 +674,9 @@ end
 
 ---------------------------------------------------------------------------------------
 -- Executes LMB-hold + Scroll Wheel vacuum sweep across the snapshotted row with braking.
--- Stops immediately once the snapshotted row's items are exhausted until the user pauses
--- scrolling for SWEEP_BRAKE_RELEASE_MS (250 ms) or releases and re-presses LMB.
+-- Transfers full item stacks 1:1 per scroll step without skipping items, moves up to the
+-- row above when a leftward sweep finishes a row, and brakes for SWEEP_BRAKE_RELEASE_MS
+-- (250 ms) at row boundaries.
 -- Arguments: dir_sign (number) - -1 for UP/Left sweep, +1 for DOWN/Right sweep
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
@@ -632,19 +713,66 @@ local function execute_vacuum_sweep(dir_sign)
         end
     end
 
-    local row = cursor_idx and grid_rows[cursor_idx.y] or nil
-    local entry = (row and cursor_idx) and row[cursor_idx.x] or nil
+    local pre_y = cursor_idx.y
+    local pre_x = cursor_idx.x
+    local row = grid_rows[pre_y]
+    local pre_row_len = row and #row or 0
+    local entry = row and row[pre_x] or nil
     if not entry or not entry.item_id or not sweep_active_row_ids[entry.item_id] or not cursor_object then
+        if dir_sign < 0 and pre_y > 1 then
+            cursor_idx.y = pre_y - 1
+            cursor_idx.x = 999
+            clamp_or_init_cursor()
+        end
         sweep_row_braked = true
         sweep_brake_tg = now_tg
+        sweep_active_row_ids = nil
         return
     end
 
     sweep_active_row_ids[entry.item_id] = nil
-    transfer_single_item_to_actor(cursor_object)
+    if type(entry.stack_ids) == "table" then
+        for i = 1, #entry.stack_ids do
+            sweep_active_row_ids[entry.stack_ids[i]] = nil
+        end
+    end
+    local row_snapshot_empty = (count_remaining_sweep_row_items() == 0)
 
-    if dir_sign < 0 and cursor_idx and cursor_idx.x > 1 then
-        cursor_idx.x = cursor_idx.x - 1
+    transfer_cell_stack_to_actor(entry, cursor_object)
+
+    if dir_sign < 0 then
+        if pre_x > 1 and not row_snapshot_empty then
+            cursor_idx.y = pre_y
+            cursor_idx.x = pre_x - 1
+        else
+            -- Leftward sweep reached the left edge of the row or emptied it:
+            -- move up to the row above (at its rightmost cell) rather than letting
+            -- the bottom row shift up into the current cursor row.
+            if pre_y > 1 then
+                cursor_idx.y = pre_y - 1
+                cursor_idx.x = 999
+            else
+                cursor_idx.y = 1
+                cursor_idx.x = 1
+            end
+            sweep_row_braked = true
+            sweep_brake_tg = now_tg
+            sweep_active_row_ids = nil
+        end
+    else
+        if row_snapshot_empty then
+            cursor_idx.y = pre_y
+            cursor_idx.x = 1
+            sweep_row_braked = true
+            sweep_brake_tg = now_tg
+            sweep_active_row_ids = nil
+        elseif pre_x >= pre_row_len then
+            cursor_idx.y = pre_y + 1
+            cursor_idx.x = 1
+            sweep_row_braked = true
+            sweep_brake_tg = now_tg
+            sweep_active_row_ids = nil
+        end
     end
 
     if hcl_ui and hcl_ui.refresh_now then
@@ -653,16 +781,22 @@ local function execute_vacuum_sweep(dir_sign)
 
     local next_row = cursor_idx and grid_rows[cursor_idx.y] or nil
     local next_entry = (next_row and cursor_idx) and next_row[cursor_idx.x] or nil
-    if count_remaining_sweep_row_items() == 0 or not next_entry or not sweep_active_row_ids[next_entry.item_id] then
-        sweep_row_braked = true
-        sweep_brake_tg = now_tg
+    if next_entry and next_entry.col_center then
+        preferred_visual_col = next_entry.col_center
+    end
+    if not sweep_row_braked then
+        if count_remaining_sweep_row_items() == 0 or not next_entry or not sweep_active_row_ids or not sweep_active_row_ids[next_entry.item_id] then
+            sweep_row_braked = true
+            sweep_brake_tg = now_tg
+            sweep_active_row_ids = nil
+        end
     end
 end
 
 ---------------------------------------------------------------------------------------
--- Executes HCL_Loot_Scroll (1 step per wheel notch) or vacuum sweep in LOOT state.
+-- Executes 1:1 HCL_Loot_Scroll (never skipping items or rows) or vacuum sweep in LOOT.
 -- Arguments: dir (number) - Wheel direction (>0 / 1 for UP, <=0 / 0 for DOWN)
---            alt_held (boolean) - Whether ALT modifier is active
+--            alt_held (boolean) - Whether Universal Modifier Key is active
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
 local function handle_loot_scroll(dir, alt_held)
@@ -1118,7 +1252,9 @@ function process_mouse_release_edges(force_lmb, force_rmb)
                 end
             elseif not was_swept then
                 if cursor_idx and cursor_object then
-                    if transfer_single_item_to_actor(cursor_object) and hcl_ui and hcl_ui.refresh_now then
+                    local row = grid_rows[cursor_idx.y]
+                    local entry = row and row[cursor_idx.x] or nil
+                    if transfer_cell_stack_to_actor(entry, cursor_object) and hcl_ui and hcl_ui.refresh_now then
                         hcl_ui.refresh_now()
                     end
                 end
@@ -1213,9 +1349,7 @@ end
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
 local function on_before_key_press(key, bind, dis, flags)
-    local lalt = DIK_keys and DIK_keys.DIK_LMENU or 56
-    local ralt = DIK_keys and DIK_keys.DIK_RMENU or 184
-    if key == lalt or key == ralt then
+    if is_modifier_key_code(key) then
         alt_modifier = true
     end
 
@@ -1286,9 +1420,7 @@ end
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
 local function on_key_release(key, bind)
-    local lalt = DIK_keys and DIK_keys.DIK_LMENU or 56
-    local ralt = DIK_keys and DIK_keys.DIK_RMENU or 184
-    if key == lalt or key == ralt then
+    if is_modifier_key_code(key) then
         alt_modifier = false
     end
 

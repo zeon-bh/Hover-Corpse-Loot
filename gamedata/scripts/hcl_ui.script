@@ -77,6 +77,30 @@ local function container_disable_deferred(self)
 end
 
 ---------------------------------------------------------------------------------------
+-- Safe instance override for UICellContainer:FreeRoom ensuring self.grid[row] is never nil
+-- when dynamic hcl_ui_main_x column resizing or async stack removal resets cells.
+-- Arguments: self (UICellContainer) - Loot cell container instance
+--            r (number) - Starting row index
+--            c (number) - Starting column index
+--            w (number) - Cell width in grid units
+--            h (number) - Cell height in grid units
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function container_safe_free_room(self, r, c, w, h)
+    if not self.grid or not r or not c or not w or not h then return end
+    local max_cols = self.cols or 5
+    for row = r, r + (h - 1) do
+        if type(self.grid[row]) == "table" then
+            for col = c, c + (w - 1) do
+                if col <= max_cols then
+                    self.grid[row][col] = true
+                end
+            end
+        end
+    end
+end
+
+---------------------------------------------------------------------------------------
 -- Resolves the active SortingPlus sort_method for corpse loot ('sizekind' default).
 -- Defaults to 'sizekind' before ui_inventory.GUI is opened so RAX Icon Override's
 -- uninitialized 'kind' category-line state cannot hide or abort initial cell placement.
@@ -302,6 +326,7 @@ function HCL_HUD:InitControls()
     self.loot_container.disable_bar = false
     self.loot_container.deferred = false
     self.loot_container.GetDeferredEnabled = container_disable_deferred
+    self.loot_container.FreeRoom = container_safe_free_room
     if self.loot_container.pad then
         self.loot_container.pad:Show(false)
     end
@@ -433,7 +458,8 @@ end
 ---------------------------------------------------------------------------------------
 function HCL_HUD:ApplyLayout(total_h)
     local ratio = utils_xml.screen_ratio()
-    local win_w = HCL_UI_MAIN_X * ratio
+    local base_w = clamp_val((hcl_mcm and tonumber(hcl_mcm.get("hcl_ui_main_x"))) or HCL_UI_MAIN_X, 200, 500)
+    local win_w = base_w * ratio
     local win_h = clamp_val(total_h or HCL_UI_MAIN_Y_MIN, HCL_UI_MAIN_Y_MIN, HCL_UI_MAIN_Y_MAX)
 
     local x_off = ((hcl_mcm and tonumber(hcl_mcm.get("hcl_x_offset"))) or 150) * ratio
@@ -609,7 +635,8 @@ end
 
 ---------------------------------------------------------------------------------------
 -- Per-frame CUI update interpolating cursor position/size with a smooth gradient step
--- and evaluating falling-edge mouse button release triggers at full frame rate.
+-- scaled by hcl_s_acceleration (1.0..5.0) and evaluating falling-edge mouse button
+-- release triggers at full frame rate.
 -- Arguments: none
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
@@ -626,7 +653,8 @@ function HCL_HUD:Update()
     local dt = m_max(1, m_min(100, now_tg - (self.last_interp_tg or now_tg)))
     self.last_interp_tg = now_tg
 
-    local t = 1.0 - m_exp(-dt * 0.028)
+    local s_accel = clamp_val((hcl_mcm and tonumber(hcl_mcm.get("hcl_s_acceleration"))) or 1.0, 1.0, 5.0)
+    local t = 1.0 - m_exp(-dt * 0.028 * s_accel)
     self.cur_x = self.cur_x + ((self.target_x - self.cur_x) * t)
     self.cur_y = self.cur_y + ((self.target_y - self.cur_y) * t)
     self.cur_w = self.cur_w + ((self.target_w - self.cur_w) * t)
@@ -699,7 +727,30 @@ function HCL_HUD:RenderLootGrid(npc, objects_map, is_looting)
         local prev_scroll = self.scroll_pos or (cont.scroll and cont.scroll:GetCurrentScrollPos()) or 0
         cont.prof:Show(true)
         cont:AdjustWnd(loot_x, loot_y, loot_w, loot_h)
+        local prev_cols = cont.cols
         cont:SetGridSpecs()
+        if prev_cols ~= cont.cols and cont.grid and cont.cols then
+            if cont.cell then
+                for _, ci in pairs(cont.cell) do
+                    if type(ci) == "table" then
+                        ci.area = nil
+                    end
+                end
+            end
+            for r = 1, #cont.grid do
+                local row_tbl = cont.grid[r]
+                if type(row_tbl) == "table" then
+                    for c = 1, cont.cols do
+                        row_tbl[c] = true
+                    end
+                    for c, _ in pairs(row_tbl) do
+                        if type(c) == "number" and c > cont.cols then
+                            row_tbl[c] = nil
+                        end
+                    end
+                end
+            end
+        end
 
         reinit_container_with_overlay_masks(cont, objects_map)
 
@@ -759,16 +810,33 @@ function HCL_HUD:ShowHud()
         self.is_attached = true
     end
     self:Show(true)
+    if self.frame then
+        self.frame:Show(true)
+    end
 end
 
 ---------------------------------------------------------------------------------------
--- Detaches and hides the HCL_HUD dialog from the X-Ray player HUD.
+-- Hides the HCL_HUD dialog without detaching from the player HUD render list so rapid
+-- corpse-to-corpse transitions never drop or re-queue C++ dialog render pointers.
 -- Arguments: none
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
 function HCL_HUD:HideHud()
     self:Show(false)
+    if self.frame then
+        self.frame:Show(false)
+    end
     self.cursor_initialized = false
+    self.scroll_pos = 0
+end
+
+---------------------------------------------------------------------------------------
+-- Detaches the HCL_HUD dialog from the X-Ray player HUD upon actor net_destroy.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function HCL_HUD:DestroyHud()
+    self:HideHud()
     if self.is_attached then
         local hud = get_hud and get_hud()
         if hud then
@@ -855,6 +923,10 @@ function tick(corpse_status, cb_status, npc)
     if cb_status == "PREVIEW" then
         if current_ui_state ~= "PREVIEW" or rendered_corpse_id ~= npc_id or rendered_inv_hash ~= inv_hash or ui_dirty then
             local hud = get_hud_instance()
+            if rendered_corpse_id ~= npc_id then
+                hud.scroll_pos = 0
+                hud.cursor_initialized = false
+            end
             current_ui_state = "PREVIEW"
             hud:RenderLootGrid(npc, objects_map, false)
             rendered_corpse_id = npc_id
@@ -870,6 +942,10 @@ function tick(corpse_status, cb_status, npc)
         local hud = get_hud_instance()
         local state_changed = (current_ui_state ~= "LOOTING")
         if state_changed or rendered_corpse_id ~= npc_id or rendered_inv_hash ~= inv_hash or ui_dirty then
+            if rendered_corpse_id ~= npc_id then
+                hud.scroll_pos = 0
+                hud.cursor_initialized = false
+            end
             current_ui_state = "LOOTING"
             hud:RenderLootGrid(npc, objects_map, true)
             rendered_corpse_id = npc_id
@@ -932,7 +1008,7 @@ end
 ---------------------------------------------------------------------------------------
 local function actor_on_net_destroy()
     if hud_instance then
-        hud_instance:HideHud()
+        hud_instance:DestroyHud()
         hud_instance = nil
     end
     current_ui_state = "HIDDEN"

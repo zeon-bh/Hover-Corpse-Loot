@@ -1028,12 +1028,13 @@ local function execute_field_strip_on_weapon(wpn)
         end
     end
 
-    -- 3. Strip valid non-barrel WPO parts and persist parts table on wpn_id before any clone
+    -- 3. Strip valid non-barrel WPO parts >= hcl_wpn_prt_min_cond and persist parts table on wpn_id before any clone
+    local min_cond = tonumber(hcl_mcm and hcl_mcm.get and hcl_mcm.get("hcl_wpn_prt_min_cond")) or 60
     local parts = item_parts and item_parts.get_parts_con and item_parts.get_parts_con(wpn, nil, true) or nil
     if parts then
         local part_keys = {}
         for k, v in pairs(parts) do
-            if k ~= parent_sec and k ~= sec and type(v) == "number" and v > 0 and not tostring(k):find("barrel") then
+            if k ~= parent_sec and k ~= sec and type(v) == "number" and v >= min_cond and not tostring(k):find("barrel") then
                 part_keys[#part_keys + 1] = k
             end
         end
@@ -1041,7 +1042,7 @@ local function execute_field_strip_on_weapon(wpn)
         for i = 1, #part_keys do
             local k = part_keys[i]
             local cond_val = parts[k]
-            if cond_val and cond_val > 0 then
+            if cond_val and cond_val >= min_cond then
                 stripped_parts[#stripped_parts + 1] = { sec = k, cond = cond_val }
                 if zzzz_arti_jamming_repairs and zzzz_arti_jamming_repairs.remove_part then
                     zzzz_arti_jamming_repairs.remove_part(k, parts)
@@ -1167,6 +1168,186 @@ local function dispatch_special_function(func_mode)
         end
         return
     end
+end
+
+-- [SYSTEM] HCL_Loot_KNum
+
+local FALLBACK_TAB_KINDS = {
+    [1]  = { s_all = true },
+    [2]  = { w_base = true, w_pistol = true, w_shotgun = true, w_smg = true, w_rifle = true, w_sniper = true, w_melee = true, w_misc = true, w_explosive = true },
+    [3]  = { o_light = true, o_medium = true, o_sci = true, o_heavy = true, o_helmet = true, i_backpack = true, i_attach = true },
+    [4]  = { w_ammo = true, mags = true, loadout = true },
+    [5]  = { i_arty = true, i_arty_junk = true, i_arty_cont = true, i_mutant_belt = true, i_mutant_part = true },
+    [6]  = { i_device = true, i_tool = true, i_repair = true, i_kit = true, w_mbolt = true },
+    [7]  = { i_mutant_raw = true, i_mutant_cooked = true, i_food = true, i_drink = true },
+    [8]  = { i_medical = true },
+    [9]  = { i_upgrade = true },
+    [10] = { i_misc = true, i_letter = true, i_part = true, i_quest = true, faction_patch = true },
+}
+
+local cached_tab_kinds = nil
+
+---------------------------------------------------------------------------------------
+-- Resolves the item kind lookup set for a UI Inventory sort tab (button_sort_tab_1..10).
+-- Dynamically parses ini_sys [button_sort_tab_N] and augments Ammo/Misc with SortingPlus
+-- custom kind aliases ('mags', 'loadout', 'faction_patch') with fallback to Bartoche tabs.
+-- Arguments: tab_num (number) - Logical tab index (1..10)
+-- Returns: (table|nil) - Set table {[kind_string] = true} for the requested tab
+---------------------------------------------------------------------------------------
+local function get_tab_kinds_map(tab_num)
+    if not cached_tab_kinds then
+        cached_tab_kinds = {}
+        for i = 1, 10 do
+            local sec_name = "button_sort_tab_" .. tostring(i)
+            local parsed = nil
+            if ini_sys and parse_list and ini_sys:section_exist(sec_name) then
+                parsed = parse_list(ini_sys, sec_name, "kinds", true)
+            end
+            if type(parsed) == "table" and next(parsed) ~= nil then
+                if parsed.w_ammo then
+                    parsed.mags = true
+                    parsed.loadout = true
+                end
+                if parsed.i_misc then
+                    parsed.faction_patch = true
+                end
+                cached_tab_kinds[i] = parsed
+            else
+                cached_tab_kinds[i] = FALLBACK_TAB_KINDS[i]
+            end
+        end
+    end
+    return cached_tab_kinds[tab_num]
+end
+
+---------------------------------------------------------------------------------------
+-- Checks whether a grid row contains items belonging to the target UI Inventory tab kinds.
+-- Evaluates both base Anomaly SYS_GetParam 'kind' and SortingPlus get_sort_kind(sec).
+-- Arguments: row (table|nil) - Row entry list from grid_rows[r]
+--            kinds_set (table|nil) - Set of valid item kind strings for the target tab
+-- Returns: (boolean) - True if the row matches the target tab's item kinds
+---------------------------------------------------------------------------------------
+local function does_row_match_tab_kinds(row, kinds_set)
+    if not row or #row == 0 or not kinds_set then
+        return false
+    end
+    if kinds_set.s_all then
+        return true
+    end
+    for i = 1, #row do
+        local entry = row[i]
+        local sec = entry and entry.section or nil
+        if not sec and entry then
+            local obj = resolve_entry_object(entry)
+            sec = obj and obj:section() or nil
+        end
+        if sec then
+            local raw_kind = SYS_GetParam(0, sec, "kind", nil)
+            if raw_kind and kinds_set[raw_kind] then
+                return true
+            end
+            if zzz_rax_sortingplus_mcm and zzz_rax_sortingplus_mcm.get_sort_kind then
+                local sp_kind = zzz_rax_sortingplus_mcm.get_sort_kind(sec)
+                if sp_kind and kinds_set[sp_kind] then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+---------------------------------------------------------------------------------------
+-- Moves cursor_idx to the start (column 1) of a target grid row and refreshes HCL_UI.
+-- Arguments: target_y (number) - 1-based target row index in grid_rows
+-- Returns: (boolean) - True if the cursor moved to a valid row
+---------------------------------------------------------------------------------------
+local function jump_cursor_to_row(target_y)
+    if not target_y or target_y < 1 or target_y > #grid_rows then
+        return false
+    end
+    local row = grid_rows[target_y]
+    if not row or #row == 0 then
+        return false
+    end
+    if not cursor_idx then
+        cursor_idx = { x = 1, y = target_y }
+    else
+        cursor_idx.y = target_y
+        cursor_idx.x = 1
+    end
+    clamp_or_init_cursor()
+    local entry = row[cursor_idx and cursor_idx.x or 1]
+    if entry and entry.col_center then
+        preferred_visual_col = entry.col_center
+    end
+    if hcl_ui and hcl_ui.on_cursor_moved then
+        hcl_ui.on_cursor_moved()
+    end
+    return true
+end
+
+---------------------------------------------------------------------------------------
+-- Executes HCL_Loot_KNum [rule] Jump Row for number keys (1-5) and modifier + (1-5).
+-- Maps (1-5) to (6..10 / key 0) when alt_held is true, then jumps by UI Inventory tab
+-- item kind ('Item Kind', cycling across multi-row tabs) or direct row ('Exact Row').
+-- Arguments: base_num (number) - Base number key pressed (1..5)
+--            alt_held (boolean) - True if hcl_univ_modifier is held down
+-- Returns: (boolean) - True if cursor_idx jumped to a valid matching row
+---------------------------------------------------------------------------------------
+local function handle_knum_jump(base_num, alt_held)
+    clamp_or_init_cursor()
+    if not base_num or #grid_rows == 0 then
+        return false
+    end
+
+    local target_num = alt_held and (base_num + 5) or base_num
+    local jump_type = tostring((hcl_mcm and hcl_mcm.get and hcl_mcm.get("hcl_jump_type")) or "Exact Row")
+
+    if jump_type == "Exact Row" or jump_type == "ExactRow" then
+        local moved = jump_cursor_to_row(target_num)
+        z_probe(2, "HCL_Loot_KNum", "Exact Row jump (key=%d, alt=%s -> row=%d, moved=%s)", base_num, tostring(alt_held), target_num, tostring(moved))
+        return moved
+    end
+
+    -- "Item Kind" mode: match UI Inventory sort tabs [button_sort_tab_1..10]
+    if target_num == 1 then
+        local moved = jump_cursor_to_row(1)
+        z_probe(3, "HCL_Loot_KNum", "Item Kind Tab 1 (s_all) jump -> row=1 (moved=%s)", tostring(moved))
+        return moved
+    end
+
+    local kinds_set = get_tab_kinds_map(target_num)
+    if not kinds_set then
+        return false
+    end
+
+    local matching_rows = {}
+    for r = 1, #grid_rows do
+        if does_row_match_tab_kinds(grid_rows[r], kinds_set) then
+            matching_rows[#matching_rows + 1] = r
+        end
+    end
+
+    if #matching_rows == 0 then
+        z_probe(3, "HCL_Loot_KNum", "Item Kind Tab %d has no matching rows on corpse", target_num)
+        return false
+    end
+
+    local target_row = matching_rows[1]
+    local cur_y = cursor_idx and cursor_idx.y or nil
+    if cur_y and #matching_rows > 1 then
+        for i = 1, #matching_rows do
+            if matching_rows[i] == cur_y then
+                target_row = matching_rows[(i % #matching_rows) + 1]
+                break
+            end
+        end
+    end
+
+    local moved = jump_cursor_to_row(target_row)
+    z_probe(2, "HCL_Loot_KNum", "Item Kind Tab %d jump -> row=%d (matches=%d, alt=%s)", target_num, target_row, #matching_rows, tostring(alt_held))
+    return moved
 end
 
 ---------------------------------------------------------------------------------------
@@ -1339,9 +1520,9 @@ function tick(corpse_status, cb_status, npc)
 end
 
 ---------------------------------------------------------------------------------------
--- Intercepts LMB/RMB and Weapon Fire/ADS before the engine processes them during LOOT.
--- Latches rising-edge press state once per click while consuming fire/ADS every frame;
--- actual item actions execute strictly once on physical button release.
+-- Intercepts LMB/RMB, Weapon Fire/ADS/Selection, and Number Keys (1-5) during LOOT.
+-- Latches rising-edge press state once per click while consuming fire/ADS/weapon slots;
+-- triggers HCL_Loot_KNum on keys (1-5) and executes mouse actions on physical release.
 -- Arguments: key (number) - DIK key/mouse code
 --            bind (number) - Action binding ID
 --            dis (boolean) - Disabled flag
@@ -1357,6 +1538,43 @@ local function on_before_key_press(key, bind, dis, flags)
     local in_post_loot_grace = (now_tg < post_loot_block_until_tg)
     local cb_status = hcl_main and hcl_main.get_callback_status and hcl_main.get_callback_status() or "IDLE"
     local is_loot_active = (cb_status == "LOOT" and #grid_rows > 0)
+
+    if is_loot_active then
+        local dik_1 = (DIK_keys and DIK_keys.DIK_1) or 2
+        local dik_5 = (DIK_keys and DIK_keys.DIK_5) or 6
+        local base_knum = nil
+        if type(key) == "number" and key >= dik_1 and key <= dik_5 then
+            base_knum = (key - dik_1) + 1
+        elseif DIK_keys then
+            for i = 1, 5 do
+                if key == DIK_keys["DIK_NUMPAD" .. tostring(i)] then
+                    base_knum = i
+                    break
+                end
+            end
+        end
+
+        local is_wpn_select = (bind ~= nil and bind ~= 0 and key_bindings ~= nil and (
+            bind == key_bindings.kWPN_1 or
+            bind == key_bindings.kWPN_2 or
+            bind == key_bindings.kWPN_3 or
+            bind == key_bindings.kWPN_4 or
+            bind == key_bindings.kWPN_5 or
+            bind == key_bindings.kWPN_6 or
+            bind == key_bindings.kWPN_NEXT
+        ))
+
+        if base_knum ~= nil or is_wpn_select then
+            if flags then
+                flags.ret_value = false
+            end
+            if base_knum ~= nil then
+                alt_modifier = is_alt_pressed()
+                handle_knum_jump(base_knum, alt_modifier)
+            end
+            return
+        end
+    end
 
     if not is_loot_active and not in_post_loot_grace and not lmb_held and not rmb_held then
         return

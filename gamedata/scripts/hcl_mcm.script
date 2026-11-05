@@ -33,6 +33,8 @@ local DEFAULTS = {
     hcl_bg_scolor_brightness = 75,
     hcl_s_acceleration       = 1.0,
     hcl_univ_modifier        = (DIK_keys and DIK_keys.DIK_LMENU) or 56,
+    hcl_jump_type            = "Exact Row",
+    hcl_wpn_prt_min_cond     = 60,
 }
 
 local OPTION_PATHS = {
@@ -51,6 +53,8 @@ local OPTION_PATHS = {
     hcl_bg_scolor_brightness = "hcl/ui_controls/hcl_bg_scolor_brightness",
     hcl_s_acceleration       = "hcl/ui_controls/hcl_s_acceleration",
     hcl_univ_modifier        = "hcl/ui_controls/hcl_univ_modifier",
+    hcl_jump_type            = "hcl/ui_controls/hcl_jump_type",
+    hcl_wpn_prt_min_cond     = "hcl/ui_controls/hcl_wpn_prt_min_cond",
 }
 
 local COLOR_PRESETS = {
@@ -81,12 +85,20 @@ local function refresh_settings_cache()
             end
         end
         if resolved ~= nil then
-            settings_cache[opt_id] = resolved
+            if opt_id == "hcl_jump_type" then
+                if resolved == "ItemKind" or resolved == "Item Kind" then
+                    settings_cache[opt_id] = "Item Kind"
+                else
+                    settings_cache[opt_id] = "Exact Row"
+                end
+            else
+                settings_cache[opt_id] = resolved
+            end
         else
             settings_cache[opt_id] = def_val
         end
     end
-    z_probe(2, "HCL_MCM", "Settings cache refreshed (toggle=%s, x=%s, y=%s, win_x=%s, opacity=%s, delay=%s, dist=%s, color=%s, accel=%s, mod=%s)",
+    z_probe(2, "HCL_MCM", "Settings cache refreshed (toggle=%s, x=%s, y=%s, win_x=%s, opacity=%s, delay=%s, dist=%s, color=%s, accel=%s, mod=%s, jump=%s, min_cond=%s)",
         tostring(settings_cache.hcl_toggle),
         tostring(settings_cache.hcl_x_offset),
         tostring(settings_cache.hcl_y_offset),
@@ -96,7 +108,9 @@ local function refresh_settings_cache()
         tostring(settings_cache.hcl_max_dist),
         tostring(settings_cache.hcl_bg_scolor),
         tostring(settings_cache.hcl_s_acceleration),
-        tostring(settings_cache.hcl_univ_modifier))
+        tostring(settings_cache.hcl_univ_modifier),
+        tostring(settings_cache.hcl_jump_type),
+        tostring(settings_cache.hcl_wpn_prt_min_cond))
 end
 
 ---------------------------------------------------------------------------------------
@@ -218,6 +232,18 @@ function on_mcm_load()
                     { id = "hcl_bg_scolor_brightness", type = "track", val = 2, min = 1, max = 100, step = 1, def = DEFAULTS.hcl_bg_scolor_brightness },
                     { id = "hcl_s_acceleration", type = "track", val = 2, min = 1.0, max = 5.0, step = 0.1, def = DEFAULTS.hcl_s_acceleration },
                     { id = "hcl_univ_modifier", type = "key_bind", val = 2, def = DEFAULTS.hcl_univ_modifier },
+                    {
+                        id = "hcl_jump_type",
+                        type = "list",
+                        val = 0,
+                        def = "ExactRow",
+                        no_str = true,
+                        content = {
+                            { "ExactRow", "Exact Row" },
+                            { "ItemKind", "Item Kind" },
+                        },
+                    },
+                    { id = "hcl_wpn_prt_min_cond", type = "track", val = 2, min = 1, max = 100, step = 1, def = DEFAULTS.hcl_wpn_prt_min_cond },
                 },
             },
         },

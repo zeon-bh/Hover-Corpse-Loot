@@ -47,13 +47,13 @@
         <text>Hover UI Horizontal Size (X Axis)</text>
     </string>
     <string id="ui_mcm_hcl_ui_options_hcl_ui_opacity">
-        <text>Adjust the Opacity of the Hover UI Window</text>
+        <text>Opacity of the Hover UI Window</text>
     </string>
     <string id="ui_mcm_hcl_ui_options_hcl_ui_delay">
-        <text>Adjust the delay for Hover Corpse Loot UI to be displayed on HUD</text>
+        <text>Activation Delay for Hover Corpse Loot UI</text>
     </string>
     <string id="ui_mcm_hcl_ui_options_hcl_max_dist">
-        <text>Maximum distance from a stalker body to open the Hover UI Window</text>
+        <text>Maximum distance from corpse to activate Hover UI</text>
     </string>
 
     <string id="ui_mcm_hcl_ui_controls_hcl_bg_scolor">
@@ -72,7 +72,16 @@
         <text>Universal Modifier Key</text>
     </string>
     <string id="ui_mcm_hcl_ui_controls_hcl_univ_modifier_desc">
-        <text>Rebind the Universal modifier key\n- Mouse Click Modifiers\n[MODIFIER + MOUSE LMB] = Field Strip weapon parts and attachments.\n[MODIFIER + MOUSE RMB] = Disassemble Item\n\n- Mouse Scroll Wheel Modifiers\n[MODIFIER + SCROLL WHEEL(UP/DOWN)] = Move the cursor along column (Y-Axis Movement)</text>
+        <text>Rebind the Universal modifier key\n[MODIFIER + MOUSE LMB] = Field Strip weapon parts and attachments.\n[MODIFIER + MOUSE RMB] = Disassemble Item\n[MODIFIER + SCROLL WHEEL(UP/DOWN)] = Move the cursor along column (Y-Axis Movement)\n[MODIFIER + KEYBOARD NUMBER KEY (1-5)] = Number keys (1-5) maps to (6,0)</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_controls_hcl_jump_type">
+        <text>Keyboard number key shortcut behavior</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_controls_hcl_jump_type_desc">
+        <text>Exact Row : Cursor jumps to the exact row shown in the Hover UI\nItem Kind : Cursor in Hover UI Jumps to the item row matching their kind (Weapons = 2, Ammo = 4)</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_controls_hcl_wpn_prt_min_cond">
+        <text>Minimum weapon parts condition to Strip</text>
     </string>
 
     <string id="ui_mcm_lst_hcl_amber">
@@ -86,6 +95,12 @@
     </string>
     <string id="ui_mcm_lst_hcl_green">
         <text>Green</text>
+    </string>
+    <string id="ui_mcm_lst_hcl_item_kind">
+        <text>Item Kind</text>
+    </string>
+    <string id="ui_mcm_lst_hcl_exact_row">
+        <text>Exact Row</text>
     </string>
 
     <string id="st_hcl_claimed">

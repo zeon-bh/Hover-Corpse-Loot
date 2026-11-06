@@ -16,7 +16,7 @@ Hover Corpse Loot uses a natural **Look first, Scroll to loot** flow so the UI n
    - **No Accidental Triggers:** Simply glancing at a body won't prematurely trigger cash pickups, stash notifications, or scavenging animations.
 2. **Scroll to Loot (`Loot Mode`):**
    Roll your **Mouse Wheel (`Up` or `Down`)** once to activate the item selector!
-   - As soon as you enter **Loot Mode**, you automatically pocket the stalker's loose cash, PDA notes, and stash coordinates.
+   - As soon as you enter **Loot Mode**, you automatically pocket the stalker's loose cash, PDA notes, and stash coordinates, and the corpse is immediately marked **`[LOOTED]`** so you always know which bodies have already rolled for stashes and cash.
    - Your weapon fire and aiming are temporarily locked while the selector is active so you can click to grab items without firing your gun.
    - Look away from the body at any time to close the window and instantly restore normal weapon controls.
 3. **Classic Inventory Anytime:**
@@ -47,13 +47,15 @@ Hover Corpse Loot uses a natural **Look first, Scroll to loot** flow so the UI n
 ## Handy Features & Visual Indicators
 
 - **Full Inventory Icon Details:**
-  Displays item durability/condition bars, weapon and armor internal part condition dots, repair-kit compatibility icons, armor faction patches, ammo types, and item stack counters—matching the look and rules of your main inventory.
+  Displays item durability/condition bars, weapon and armor internal part condition dots, repair-kit compatibility icons, armor faction patches, ammo types, item stack counters, and **SortingPlus** Favorite/Junk overlay icons and cell background highlights—matching the look and rules of your main inventory.
 - **Smart Status Tags:**
-  - **`[LOOTED]` Tag:** A bright green badge in the top-right corner of the header lets you see at a glance which bodies you have already checked after a chaotic firefight.
+  - **`[LOOTED]` Tag:** A bright green badge in the top-right corner of the header is applied immediately upon entering **Loot Mode** (in sync with stash and cash generation, and retro-compatible with bodies already searched in existing saves) so you can see at a glance which bodies you have already checked after a chaotic firefight.
   - **`<CLAIMED>` Banner:** If another living stalker nearby has claimed the kill, the window displays `<CLAIMED>` in yellow and locks out looting so you don't accidentally steal their loot and turn their squad hostile.
   - **`<EMPTY>` Banner:** Clearly marks bodies that have nothing left to take.
-- **Auto-Sorting & Scrollable Grid:**
-  Automatically sorts items to match your inventory order (including **SortingPlus** categories) and adds a clean, auto-following scrollbar whenever a heavily packed body exceeds the window height.
+- **Full SortingPlus Parity, Auto-Sorting & Scrollable Grid:**
+  Automatically mirrors your **SortingPlus** MCM configuration—including your custom category priority list, **Favorites** and **Junk** custom sorting order, and Favorite/Junk icon overlays and cell highlights—while adding a clean, auto-following scrollbar whenever a heavily packed body exceeds the window height.
+- **Adaptive Footer Item Label:**
+  Displays the highlighted item's full name centered in the footer bar and dynamically truncates extra-long names with trailing `...` scaled to your configured Hover UI window width (`Window Width (X Axis)`).
 
 ---
 
@@ -87,8 +89,11 @@ Everything can be tailored to your screen setup under **MCM $\rightarrow$ Hover 
   - **S.T.A.L.K.E.R. G.A.M.M.A.** (respects G.A.M.M.A. firearm condition display rules and loot tables)
   - **Arti's Weapon Parts Overhaul (WPO)** (full internal part dot display and one-click field-stripping)
   - **FDDA / Animations** (works seamlessly alongside body search and disassembly animations)
-  - **RavenAscendant's SortingPlus** (automatically syncs with your active loot bag sort method)
+  - **RavenAscendant's SortingPlus** (full MCM parity: respects your custom category priority list, Favorites & Junk sorting order, Favorite/Junk overlay icons, and persistent cell background highlights)
   - **Utjan's Item UI Improvements / QoL Bundle** (mirrors your part dots, repair badges, and icon overlays)
   - **Grok's NPC Loot Claim** (detects claimed bodies safely without triggering hostility)
   - **Haruka's Scavenger Skill & Guaranteed Loot mods**
   - **Custom UI Font Mods** (automatically adapts to your active modpack font profile)
+
+<p align="right"><sub><em style="opacity: 0.65;">(Designed using Z and AAMT)</em></sub></p>
+<p align="right"><sub><em style="opacity: 0.65;">[GTTIC]</em></sub></p>

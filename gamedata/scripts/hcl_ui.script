@@ -101,13 +101,26 @@ local function container_safe_free_room(self, r, c, w, h)
 end
 
 ---------------------------------------------------------------------------------------
--- Resolves the active SortingPlus sort_method for corpse loot ('sizekind' default).
--- Defaults to 'sizekind' before ui_inventory.GUI is opened so RAX Icon Override's
--- uninitialized 'kind' category-line state cannot hide or abort initial cell placement.
+-- Resolves the active SortingPlus sort_method for corpse loot ('kind' or 'sizekind').
+-- Reads SortingPlus/npcinv from zzz_rax_sortingplus_mcm / ui_mcm so the Hover UI
+-- matches the user's exact SortingPlus NPC Inventory sorting mode even when the
+-- vanilla loot window has never been opened.
 -- Arguments: none
--- Returns: (string) - Sort method identifier for UICellContainer
+-- Returns: (string) - Sort method identifier ('kind' or 'sizekind') for UICellContainer
 ---------------------------------------------------------------------------------------
 local function resolve_sorting_method()
+    if zzz_rax_sortingplus_mcm then
+        if ui_mcm and ui_mcm.get then
+            local npcinv = ui_mcm.get("SortingPlus/npcinv")
+            if npcinv ~= nil then
+                return npcinv and "kind" or "sizekind"
+            end
+        end
+        if zzz_rax_sortingplus_mcm.NPCINV ~= nil then
+            return zzz_rax_sortingplus_mcm.NPCINV and "kind" or "sizekind"
+        end
+        return "kind"
+    end
     if ui_inventory and ui_inventory.GUI and ui_inventory.GUI.CC and ui_inventory.GUI.CC["npc_bag"] then
         local sm = ui_inventory.GUI.CC["npc_bag"].sort_method
         if sm and sm ~= "" then
@@ -118,7 +131,64 @@ local function resolve_sorting_method()
 end
 
 ---------------------------------------------------------------------------------------
--- Temporarily applies HCL MCM icon overlay masks over Utjan z_item_icon_info on Reinit.
+-- Pre-warms zzz_rax_sortingplus_mcm.sort_info(sec, sec) for all items in the corpse map
+-- so SortingPlus's internal ab_k, ab_w, and ab_h tables are populated before FindFreeCell
+-- runs (including when a corpse has only a single item and spairs skips comparator calls).
+-- Arguments: objects (table|nil) - Sparse map of {[item_id] = game_object}
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function prewarm_sortingplus_info(objects)
+    if type(objects) ~= "table" then return end
+    local sort_info_fn = (zzz_rax_sortingplus_mcm and zzz_rax_sortingplus_mcm.sort_info) or (utils_ui and utils_ui.sort_info)
+    if not sort_info_fn then return end
+    local first_sec = nil
+    for _, v in pairs(objects) do
+        local sec = (type(v) == "string") and v or (v and v.section and v:section()) or nil
+        if sec then
+            pcall(sort_info_fn, sec, first_sec or sec)
+            if not first_sec then
+                first_sec = sec
+            end
+        end
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Instance override for UICellContainer:GetSortOrder that bypasses seax_sortingplus's
+-- broken upvalue factory and preserves zzz_rax_sortingplus_mcm's native sort_by_kind,
+-- sort_by_sizekind, and FindFreeCell (which hold lexical access to favorite_itms,
+-- junk_itms, SORTFAVS, SORTJUNK, and MCM item_order).
+-- Arguments: cont (UICellContainer) - Loot cell container instance
+--            t (table) - Item table being sorted
+--            sort_order (function) - Comparator returned by cont:GetSortMethod()
+-- Returns: (function) - Nil-safe comparator function for spairs(t, sort_order)
+---------------------------------------------------------------------------------------
+local function container_get_sort_order(cont, t, sort_order)
+    prewarm_sortingplus_info(t)
+    cont.original_FindFreeCell = nil
+    local fn = sort_order or cont:GetSortMethod()
+    return function(tbl, a, b)
+        if tbl[a] and tbl[b] then
+            return fn(tbl, a, b)
+        end
+        return a < b
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Fallback factory replacement used during Reinit if zzz_ray_sortingplus_mcm is active
+-- without Inventory Antifreeze, redirecting to SortingPlus's genuine sort and cell placement.
+-- Arguments: t (table) - Item table being sorted
+-- Returns: (function, function) - Native utils_ui.sort_by_kind and UICellContainer.FindFreeCell
+---------------------------------------------------------------------------------------
+local function passthrough_sort_by_kind_factory(t)
+    prewarm_sortingplus_info(t)
+    return utils_ui.sort_by_kind, utils_ui.UICellContainer.FindFreeCell
+end
+
+---------------------------------------------------------------------------------------
+-- Temporarily applies HCL MCM icon overlay masks over Utjan z_item_icon_info on Reinit
+-- while ensuring SortingPlus's native MCM priority list and Favorites/Junk order run.
 -- Arguments: container (UICellContainer) - Target cell container
 --            objects (table) - Sparse map of {[item_id] = game_object}
 -- Returns: (nil)
@@ -126,6 +196,7 @@ end
 local function reinit_container_with_overlay_masks(container, objects)
     if not container then return end
     container.sort_method = resolve_sorting_method()
+    prewarm_sortingplus_info(objects)
 
     local z_settings = z_item_icon_info and z_item_icon_info.settings
     local saved = nil
@@ -158,7 +229,16 @@ local function reinit_container_with_overlay_masks(container, objects)
         end
     end
 
+    local orig_factory = _G.sort_by_kind_factory
+    if orig_factory and zzz_rax_sortingplus_mcm then
+        _G.sort_by_kind_factory = passthrough_sort_by_kind_factory
+    end
+
     local ok, err = pcall(container.Reinit, container, objects)
+
+    if orig_factory then
+        _G.sort_by_kind_factory = orig_factory
+    end
 
     if saved and z_settings then
         if saved.cond_enable ~= nil and z_settings.cond_text then
@@ -315,8 +395,8 @@ function HCL_HUD:InitControls()
 
     self.header_sep_segs = create_gradient_separator(self.header)
 
-    -- Main Loot Window (hcl_loot_window via utils_ui.UICellContainer)
-    self.loot_container = utils_ui.UICellContainer("hcl_loot", self, nil, "hcl_loot_window", self.frame)
+    -- Main Loot Window (hcl_loot_window via utils_ui.UICellContainer with ID="npc_bag" for SortingPlus parity)
+    self.loot_container = utils_ui.UICellContainer("npc_bag", self, nil, "hcl_loot_window", self.frame)
     self.loot_container.sort_method = resolve_sorting_method()
     self.loot_container.showcase = false
     self.loot_container.can_select = false
@@ -327,6 +407,7 @@ function HCL_HUD:InitControls()
     self.loot_container.deferred = false
     self.loot_container.GetDeferredEnabled = container_disable_deferred
     self.loot_container.FreeRoom = container_safe_free_room
+    self.loot_container.GetSortOrder = container_get_sort_order
     if self.loot_container.pad then
         self.loot_container.pad:Show(false)
     end
@@ -549,6 +630,61 @@ function HCL_HUD:UpdateScrollbar()
 end
 
 ---------------------------------------------------------------------------------------
+-- Truncates and sets the footer item name text so long names never overflow the
+-- horizontal boundary of the Hover UI (hcl_ui_main_x), appending trailing "..." before
+-- the cutoff and restoring the full footer width for centered alignment.
+-- Arguments: raw_name (string) - Unformatted item full name
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function HCL_HUD:SetFooterItemText(raw_name)
+    if not self.footer_text then return end
+    local text = tostring(raw_name or "")
+    if text == "" then
+        self.footer_text:SetText("")
+        return
+    end
+
+    local ratio = utils_xml.screen_ratio()
+    local base_w = clamp_val((hcl_mcm and tonumber(hcl_mcm.get("hcl_ui_main_x"))) or HCL_UI_MAIN_X, 200, 500)
+    local win_w = (self.frame and self.frame:GetWidth() > 0) and self.frame:GetWidth() or (base_w * ratio)
+    local sep_margin = 5 * ratio
+    local sep_w = m_max(20, win_w - (2 * sep_margin))
+    local max_px_w = m_max(16, sep_w - (8 * ratio))
+
+    -- Initial character budget scaled from hcl_ui_main_x (Letterica16 ~6.7 base px/char)
+    local max_chars = m_max(12, m_floor((base_w - 20) / 6.7))
+    local cut_len = #text
+    local truncated = false
+    if cut_len > max_chars then
+        cut_len = m_max(4, max_chars - 3)
+        truncated = true
+    end
+
+    local candidate = truncated and (text:sub(1, cut_len):gsub("%s+$", "") .. "...") or text
+    self.footer_text:SetText(candidate)
+
+    if self.footer_text.AdjustWidthToText then
+        self.footer_text:AdjustWidthToText()
+        local measured_w = self.footer_text:GetWidth() or 0
+        if measured_w > max_px_w and not truncated then
+            truncated = true
+            cut_len = m_max(4, #text - 3)
+        end
+        while measured_w > max_px_w and cut_len > 4 do
+            local step = m_max(1, m_floor((cut_len * (measured_w - max_px_w)) / m_max(1, measured_w)))
+            cut_len = m_max(4, cut_len - step)
+            candidate = text:sub(1, cut_len):gsub("%s+$", "") .. "..."
+            self.footer_text:SetText(candidate)
+            self.footer_text:AdjustWidthToText()
+            measured_w = self.footer_text:GetWidth() or 0
+        end
+    end
+
+    self.footer_text:SetWndPos(vector2():set(sep_margin, 2))
+    self.footer_text:SetWndSize(vector2():set(sep_w, HCL_FOOTER_H - 3))
+end
+
+---------------------------------------------------------------------------------------
 -- Updates target cursor geometry, footer item name, and rolling viewport scroll position.
 -- Uses utils_ui's SetScrollPos(1) calibration trick so CUIScrollView scrolls reliably
 -- whenever the cursor moves above or below the visible 625 px viewport window.
@@ -560,7 +696,7 @@ function HCL_HUD:SyncCursorAndViewport(snap_immediately)
     if current_ui_state ~= "LOOTING" or not cont or not cont.cell or not hcl_loot then
         self.cursor_box:Show(false)
         self.cursor_initialized = false
-        self.footer_text:SetText("")
+        self:SetFooterItemText("")
         return
     end
 
@@ -569,7 +705,7 @@ function HCL_HUD:SyncCursorAndViewport(snap_immediately)
     if not ci or not ci.cell or not ci.cell:IsShown() then
         self.cursor_box:Show(false)
         self.cursor_initialized = false
-        self.footer_text:SetText("")
+        self:SetFooterItemText("")
         return
     end
 
@@ -630,7 +766,7 @@ function HCL_HUD:SyncCursorAndViewport(snap_immediately)
     elseif ci.section then
         full_name = (ui_item and ui_item.get_sec_name and ui_item.get_sec_name(ci.section)) or tostring(ci.section)
     end
-    self.footer_text:SetText(tostring(full_name))
+    self:SetFooterItemText(full_name)
 end
 
 ---------------------------------------------------------------------------------------

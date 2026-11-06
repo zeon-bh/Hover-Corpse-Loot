@@ -184,7 +184,56 @@ local corpse_phase1_done = {}
 local corpse_phase2_done = {}
 
 ---------------------------------------------------------------------------------------
--- Replacement wrapper for UIInventory.npc_on_use that blocks vanilla loot UI during HCL.
+-- Marks a corpse as looted by the player for the [LOOTED] header tag and persists the
+-- state in alife_storage_manager so money/stash callbacks never re-fire on save reload.
+-- Arguments: corpse_id (number) - Game object ID of the looted corpse
+--            corpse_name (string|nil) - Optional engine object name for se_save_var
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function mark_corpse_looted(corpse_id, corpse_name)
+    if not corpse_id then return end
+    looted_corpses[corpse_id] = true
+    corpse_phase2_done[corpse_id] = true
+    if se_save_var then
+        pcall(se_save_var, corpse_id, corpse_name, "hcl_looted", true)
+        pcall(se_save_var, corpse_id, corpse_name, "hcl_phase1_only", false)
+    end
+    if hcl_ui and hcl_ui.mark_dirty then
+        hcl_ui.mark_dirty()
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Checks whether a corpse has already been looted in this session or in a saved game.
+-- Recognizes both HCL's 'hcl_looted' flag and corpses searched in existing/pre-HCL saves
+-- where 'death_dropped' is already true without an active 'hcl_phase1_only' preview state.
+-- Arguments: corpse_id (number) - Game object ID of the corpse
+-- Returns: (boolean) - True if the corpse has already been looted
+---------------------------------------------------------------------------------------
+function is_corpse_looted(corpse_id)
+    if not corpse_id then return false end
+    if looted_corpses[corpse_id] then return true end
+    if se_load_var then
+        if se_load_var(corpse_id, nil, "hcl_looted") then
+            looted_corpses[corpse_id] = true
+            corpse_phase2_done[corpse_id] = true
+            return true
+        end
+        if se_load_var(corpse_id, nil, "death_dropped") and not se_load_var(corpse_id, nil, "hcl_phase1_only") then
+            looted_corpses[corpse_id] = true
+            corpse_phase2_done[corpse_id] = true
+            if se_save_var then
+                pcall(se_save_var, corpse_id, nil, "hcl_looted", true)
+            end
+            return true
+        end
+    end
+    return false
+end
+
+---------------------------------------------------------------------------------------
+-- Replacement wrapper for UIInventory.npc_on_use that blocks vanilla loot UI during HCL
+-- and syncs [LOOTED] + Phase 2 money/faction callbacks when opened via vanilla kUSE.
 -- Arguments: self (UIInventory) - Active UIInventory instance
 --            obj (game_object) - Used NPC object
 --            who (game_object) - Initiating actor object
@@ -193,6 +242,19 @@ local corpse_phase2_done = {}
 local function wrapped_ui_inventory_npc_on_use(self, obj, who)
     if hcl_suppress_loot_ui then
         return
+    end
+    if obj and IsStalker(obj) and not obj:alive() then
+        local id = obj:id()
+        local npc_name = obj:name()
+        if se_load_var and se_load_var(id, npc_name, "hcl_phase1_only") and not is_corpse_looted(id) then
+            if item_money and item_money.actor_on_loot_money then
+                pcall(item_money.actor_on_loot_money, obj)
+            end
+            if character_community then
+                SendScriptCallback("actor_on_interaction", "factions", nil, character_community(obj))
+            end
+        end
+        mark_corpse_looted(id, npc_name)
     end
     if orig_ui_inventory_npc_on_use then
         return orig_ui_inventory_npc_on_use(self, obj, who)
@@ -216,6 +278,9 @@ end
 
 ---------------------------------------------------------------------------------------
 -- Executes Phase 1 (PREPARE) item-generation callbacks once for a valid corpse.
+-- Sets 'hcl_phase1_only' when triggering death_manager.create_release_item on an unlooted
+-- corpse, or marks the corpse [LOOTED] immediately if 'death_dropped' was already set in
+-- an existing save prior to HCL Phase 1.
 -- Arguments: npc (game_object) - Target dead stalker object
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
@@ -227,12 +292,17 @@ local function run_phase1_item_generation(npc)
 
     local npc_name = npc:name()
     if not se_load_var(id, npc_name, "death_dropped") then
+        if se_save_var then
+            pcall(se_save_var, id, npc_name, "hcl_phase1_only", true)
+        end
         if death_manager and death_manager.create_release_item then
             death_manager.create_release_item(npc)
         end
         if guaranteed_loot and guaranteed_loot.npc_on_use then
             pcall(guaranteed_loot.npc_on_use, npc, db.actor)
         end
+    elseif not se_load_var(id, npc_name, "hcl_phase1_only") then
+        mark_corpse_looted(id, npc_name)
     end
     z_probe(2, "HCL_CallbackTrigger", "Phase 1 (PREPARE) item generation completed for corpse ID %d", id)
 end
@@ -250,7 +320,9 @@ local function trigger_fdda_scavenger_bonus()
 end
 
 ---------------------------------------------------------------------------------------
--- Executes Phase 2 (LOOT) non-item callbacks (money, faction, stashes/notes) once.
+-- Executes Phase 2 (LOOT) non-item callbacks (money, faction, stashes/notes) once and
+-- immediately marks the corpse [LOOTED] upon entering LOOT state. Skips all callbacks
+-- if the corpse was already looted previously so old saves never spawn duplicate money.
 -- Arguments: npc (game_object) - Target dead stalker object
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
@@ -258,9 +330,17 @@ local function run_phase2_non_item_callbacks(npc)
     if not npc or not db.actor then return end
     local id = npc:id()
     if corpse_phase2_done[id] then return end
-    corpse_phase2_done[id] = true
 
     run_phase1_item_generation(npc)
+
+    if is_corpse_looted(id) then
+        corpse_phase2_done[id] = true
+        z_probe(2, "HCL_CallbackTrigger", "Phase 2 (LOOT) skipped for already-looted corpse ID %d", id)
+        return
+    end
+
+    local npc_name = npc:name()
+    mark_corpse_looted(id, npc_name)
 
     if item_money and item_money.actor_on_loot_money then
         pcall(item_money.actor_on_loot_money, npc)
@@ -279,7 +359,7 @@ local function run_phase2_non_item_callbacks(npc)
     if liz_fdda_redone_body_search and liz_fdda_redone_body_search.haruka_scavanger_effect then
         CreateTimeEvent("hcl_fdda_scav", "scav_" .. tostring(id), 0.12, trigger_fdda_scavenger_bonus)
     end
-    z_probe(2, "HCL_CallbackTrigger", "Phase 2 (LOOT) non-item callbacks released for corpse ID %d", id)
+    z_probe(2, "HCL_CallbackTrigger", "Phase 2 (LOOT) non-item callbacks released and marked [LOOTED] for corpse ID %d", id)
 end
 
 ---------------------------------------------------------------------------------------
@@ -358,34 +438,6 @@ function unlock_interaction()
         z_probe(2, "HCL_CallbackTrigger", "Interaction unlocked via mouse wheel -> LOOT (corpse ID %d)", hovered_corpse:id())
     end
     return true
-end
-
----------------------------------------------------------------------------------------
--- Marks a corpse as looted by the player for the [LOOTED] header tag.
--- Arguments: corpse_id (number) - Game object ID of the looted corpse
--- Returns: (nil)
----------------------------------------------------------------------------------------
-function mark_corpse_looted(corpse_id)
-    if not corpse_id then return end
-    looted_corpses[corpse_id] = true
-    if se_save_var then
-        pcall(se_save_var, corpse_id, nil, "hcl_looted", true)
-    end
-end
-
----------------------------------------------------------------------------------------
--- Checks whether a corpse has been looted by the player during this session or saved state.
--- Arguments: corpse_id (number) - Game object ID of the corpse
--- Returns: (boolean) - True if the player has looted the corpse
----------------------------------------------------------------------------------------
-function is_corpse_looted(corpse_id)
-    if not corpse_id then return false end
-    if looted_corpses[corpse_id] then return true end
-    if se_load_var and se_load_var(corpse_id, nil, "hcl_looted") then
-        looted_corpses[corpse_id] = true
-        return true
-    end
-    return false
 end
 
 ---------------------------------------------------------------------------------------
@@ -471,12 +523,32 @@ local function actor_on_update()
 end
 
 ---------------------------------------------------------------------------------------
--- Resets cached raycast state when MCM options change or actor is destroyed.
+-- Resets cached raycast state when MCM options change.
 -- Arguments: none
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
 local function reset_runtime_cache()
     cached_ray = nil
+end
+
+---------------------------------------------------------------------------------------
+-- Clears session-scoped corpse tracking tables when the actor is destroyed on save load.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function actor_on_net_destroy()
+    cached_ray = nil
+    looted_corpses = {}
+    corpse_phase1_done = {}
+    corpse_phase2_done = {}
+    active_corpse_id = nil
+    hovered_corpse = nil
+    hovered_corpse_id = nil
+    corpse_check_status = "INVALID"
+    callback_status = "IDLE"
+    interaction_unlocked = false
+    timer_completed = false
+    timer_running = false
 end
 
 ---------------------------------------------------------------------------------------
@@ -489,6 +561,6 @@ function on_game_start()
     RegisterScriptCallback("actor_on_update", actor_on_update)
     RegisterScriptCallback("on_mouse_wheel", on_mouse_wheel)
     RegisterScriptCallback("on_option_change", reset_runtime_cache)
-    RegisterScriptCallback("actor_on_net_destroy", reset_runtime_cache)
+    RegisterScriptCallback("actor_on_net_destroy", actor_on_net_destroy)
     z_probe(2, "HCL_Main", "HCL_Main event controller initialized")
 end

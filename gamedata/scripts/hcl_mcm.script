@@ -65,7 +65,12 @@ local COLOR_PRESETS = {
 }
 
 local settings_cache = {}
-local gamma_hides_gun_cond = (grok_gun_no_condition_text ~= nil)
+-- Must remain a pure literal at top-level module scope because ui_mcm.gather_options()
+-- loads all *mcm.script files in the Main Menu before on_game_start() runs. Indexing
+-- grok_gun_no_condition_text at top-level would trigger X-Ray's _G.__index autoloader
+-- on grok_gun_no_condition_text -> z_item_icon_info, installing UICellItem monkey-patches
+-- while utjan_xml is still nil and crashing the New Game Faction Select screen.
+local gamma_hides_gun_cond = false
 
 ---------------------------------------------------------------------------------------
 -- Refreshes the in-memory settings cache from MCM or falls back to default values.
@@ -252,11 +257,13 @@ function on_mcm_load()
 end
 
 ---------------------------------------------------------------------------------------
--- Initializes the MCM settings cache and registers the option change callback at game start.
+-- Initializes the GAMMA weapon condition hide flag, refreshes the MCM settings cache,
+-- and registers the option change callback when a game session starts.
 -- Arguments: none
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
 function on_game_start()
+    gamma_hides_gun_cond = (grok_gun_no_condition_text ~= nil)
     refresh_settings_cache()
     RegisterScriptCallback("on_option_change", on_option_change)
 end

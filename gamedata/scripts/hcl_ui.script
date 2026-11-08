@@ -4,7 +4,9 @@ local m_min = math.min
 local m_max = math.max
 local m_abs = math.abs
 local m_exp = math.exp
+local m_random = math.random
 local s_format = string.format
+local s_rep = string.rep
 
 ---------------------------------------------------------------------------------------
 -- Outputs formatted chokepoint diagnostic telemetry to the X-Ray console log.
@@ -15,6 +17,9 @@ local s_format = string.format
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
 local function z_probe(level, station, msg, ...)
+    if hcl_debug and hcl_debug.z_probe then
+        return hcl_debug.z_probe(level, station, msg, ...)
+    end
     if level > debug_level then return end
     local ok, formatted = pcall(string.format, msg, ...)
     printf("[Hover Corpse Loot] | %s | %s", tostring(station), ok and formatted or tostring(msg))
@@ -186,14 +191,367 @@ local function passthrough_sort_by_kind_factory(t)
     return utils_ui.sort_by_kind, utils_ui.UICellContainer.FindFreeCell
 end
 
+local ltt_spinner_xml = nil
+local validated_ltt_spinner_styles = {}
+local validated_ltt_indicator_styles = {}
+
 ---------------------------------------------------------------------------------------
--- Temporarily applies HCL MCM icon overlay masks over Utjan z_item_icon_info on Reinit
--- while ensuring SortingPlus's native MCM priority list and Favorites/Junk order run.
--- Arguments: container (UICellContainer) - Target cell container
---            objects (table) - Sparse map of {[item_id] = game_object}
+-- Queries a Looting Takes Time - REDUX MCM setting with a safe fallback default.
+-- Arguments: key (string) - MCM setting key under zzzz_loot_searching_mcm
+--            default_val (any) - Fallback value if MCM module or key is absent
+-- Returns: (any) - Configured MCM value or default_val
+---------------------------------------------------------------------------------------
+local function get_ltt_mcm_value(key, default_val)
+    if _G.zzzz_loot_searching_mcm and type(zzzz_loot_searching_mcm.get_config) == "function" then
+        local ok, val = pcall(zzzz_loot_searching_mcm.get_config, key)
+        if ok and val ~= nil then
+            return val
+        end
+    end
+    if ui_mcm and type(ui_mcm.get) == "function" then
+        local ok, val = pcall(ui_mcm.get, "loot_searching/" .. tostring(key))
+        if ok and val ~= nil then
+            return val
+        end
+    end
+    return default_val
+end
+
+---------------------------------------------------------------------------------------
+-- Resolves the localized Looting Takes Time - REDUX searching label ('Searching').
+-- Arguments: none
+-- Returns: (string) - Localized searching prefix string
+---------------------------------------------------------------------------------------
+local function get_ltt_searching_label()
+    local key = "st_xcvb_looting"
+    if db.actor and alife_object then
+        local se_actor = alife_object(db.actor:id())
+        local comm = se_actor and se_actor.community and se_actor:community() or nil
+        if comm == "bandit" or comm == "renegade" then
+            key = "st_xcvb_looting_bandit"
+        end
+    end
+    local lbl = game.translate_string(key)
+    if not lbl or lbl == key then
+        lbl = game.translate_string("ui_mm_searching_corpse")
+        if not lbl or lbl == "ui_mm_searching_corpse" then
+            lbl = "Searching"
+        end
+    end
+    return lbl
+end
+
+---------------------------------------------------------------------------------------
+-- Validates that a Looting Takes Time spinner style folder contains spinner_atlas.dds.
+-- Arguments: style_name (string) - Requested spinner style folder name
+-- Returns: (string) - Validated style folder name ('tarkov_like' / 'default' fallback)
+---------------------------------------------------------------------------------------
+local function resolve_valid_spinner_style(style_name)
+    local st = tostring(style_name or "tarkov_like"):gsub("^%s+", ""):gsub("%s+$", "")
+    if st == "" then st = "tarkov_like" end
+    if validated_ltt_spinner_styles[st] then
+        return st
+    end
+    local fs = getFS and getFS() or nil
+    if fs and fs.exist then
+        if fs:exist("$game_data$", "textures\\ui\\loot_searching\\" .. st .. "\\spinner_atlas.dds") then
+            validated_ltt_spinner_styles[st] = true
+            return st
+        end
+        if fs:exist("$game_data$", "textures\\ui\\loot_searching\\tarkov_like\\spinner_atlas.dds") then
+            validated_ltt_spinner_styles["tarkov_like"] = true
+            return "tarkov_like"
+        end
+    end
+    return "default"
+end
+
+---------------------------------------------------------------------------------------
+-- Internal pcall target that hides a CUIWindow/CUIStatic widget when Show is present.
+-- Arguments: w (userdata|table) - Widget instance
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
-local function reinit_container_with_overlay_masks(container, objects)
+local function try_hide_widget(w)
+    if w.Show then
+        w:Show(false)
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Safely hides a CUIWindow/CUIStatic widget if and only if it is a userdata or table
+-- exposing a Show method (never indexes boolean, number, or string values).
+-- Arguments: w (any) - Candidate widget reference
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function safe_hide_widget(w)
+    local t = type(w)
+    if t == "userdata" or t == "table" then
+        pcall(try_hide_widget, w)
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Safely hides all CUIWindow/CUIStatic widgets stored as either values or set-keys
+-- inside a layer/indicator table on a UICellItem (e.g. ci.rax_dynamic_front_layers
+-- where CUIStatic widgets are table keys mapped to boolean 'true' values).
+-- Arguments: tbl (any) - Candidate table of widgets or widget-keyed set
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function safe_hide_widget_table(tbl)
+    if type(tbl) ~= "table" then return end
+    for k, v in pairs(tbl) do
+        safe_hide_widget(v)
+        safe_hide_widget(k)
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Hides all vanilla, SortingPlus RAX, and Utjan z_item_icon_info overlays on an
+-- unrevealed ('silhouette') cell item.
+-- Arguments: ci (UICellItem) - Target cell item instance
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function hide_unrevealed_cell_overlays(ci)
+    safe_hide_widget(ci.bar)
+    safe_hide_widget(ci.cnt)
+    safe_hide_widget(ci.ctxt)
+    safe_hide_widget(ci.ctxts)
+    safe_hide_widget(ci.upgr)
+    safe_hide_widget(ci.hl)
+    safe_hide_widget(ci.ico_scope)
+    safe_hide_widget(ci.ico_sil)
+    safe_hide_widget(ci.ico_gl)
+    safe_hide_widget(ci.cond_text)
+    safe_hide_widget(ci.cond_text_bg)
+    safe_hide_widget(ci.wpn_name)
+    safe_hide_widget(ci.wpn_name_bg)
+    safe_hide_widget(ci.gun_repair_icon)
+    safe_hide_widget(ci.mag_ammo_count)
+    safe_hide_widget(ci.mag_ammo_count_bg)
+    safe_hide_widget(ci.money_text)
+    safe_hide_widget(ci.money_text_bg)
+    safe_hide_widget(ci.recipe_text)
+    safe_hide_widget(ci.recipe_text_bg)
+    safe_hide_widget(ci.property_layer)
+    safe_hide_widget_table(ci.parts_indicators)
+    safe_hide_widget_table(ci.mag_ammo_name)
+    safe_hide_widget_table(ci.mag_ammo_name_bg)
+    safe_hide_widget_table(ci.ammo_name)
+    safe_hide_widget_table(ci.ammo_name_bg)
+    safe_hide_widget_table(ci.layer)
+    safe_hide_widget_table(ci.rax_front_layers)
+    safe_hide_widget_table(ci.rax_back_layers)
+    safe_hide_widget_table(ci.rax_dynamic_front_layers)
+end
+
+---------------------------------------------------------------------------------------
+-- Instance override for UICellContainer:FindSimilar that prevents unrevealed
+-- ('silhouette') items from stacking into revealed cells while being searched.
+-- Arguments: cont (UICellContainer) - Target cell container
+--            obj (game_object|nil) - Item object being placed
+--            sec (string|nil) - Item section string
+-- Returns: (UICellItem|boolean) - Matching revealed cell or false
+---------------------------------------------------------------------------------------
+local function container_find_similar(cont, obj, sec)
+    if obj and hcl_loot and hcl_loot.is_looting_takes_time_active and hcl_loot.is_looting_takes_time_active() then
+        local npc = hcl_main and hcl_main.get_hovered_corpse and hcl_main.get_hovered_corpse() or nil
+        local npc_id = npc and npc:id() or rendered_corpse_id
+        local ok_id, id = pcall(function() return obj:id() end)
+        if npc_id and ok_id and id and hcl_loot.is_corpse_item_unrevealed(npc_id, id) then
+            return false
+        end
+        local ci = utils_ui.UICellContainer.FindSimilar(cont, obj, sec)
+        if ci and ci.ID and npc_id and hcl_loot.is_corpse_item_unrevealed(npc_id, tonumber(ci.ID) or ci.ID) then
+            return false
+        end
+        return ci
+    end
+    return utils_ui.UICellContainer.FindSimilar(cont, obj, sec)
+end
+
+local SIL_RIM_OFFSETS = {
+    { dx = -1.5, dy =  0.0, cardinal = true  },
+    { dx =  1.5, dy =  0.0, cardinal = true  },
+    { dx =  0.0, dy = -1.5, cardinal = true  },
+    { dx =  0.0, dy =  1.5, cardinal = true  },
+    { dx = -1.0, dy = -1.0, cardinal = false },
+    { dx =  1.0, dy = -1.0, cardinal = false },
+    { dx = -1.0, dy =  1.0, cardinal = false },
+    { dx =  1.0, dy =  1.0, cardinal = false },
+}
+
+---------------------------------------------------------------------------------------
+-- Applies Looting Takes Time - REDUX pure jet-black (RGB 0,0,0) silhouettes with an
+-- 8-direction smooth white alpha-rim border for contrast against HCL's black panel,
+-- overlay masking, and per-cell animated 26 FPS spinner widgets (placeholder_mode == 2)
+-- to unrevealed cells in the container.
+-- Arguments: container (UICellContainer) - Target cell container
+--            npc_id (number|nil) - Hovered corpse object ID
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function apply_looting_takes_time_cell_visuals(container, npc_id)
+    if not container or not container.cell then
+        return
+    end
+    local ltt_active = npc_id ~= nil and hcl_loot and hcl_loot.is_looting_takes_time_active and hcl_loot.is_looting_takes_time_active() or false
+    local p_mode = tonumber(get_ltt_mcm_value("placeholder_mode", 2)) or 2
+
+    -- Pure jet-black (0,0,0) crushes 100% of internal icon details in X-Ray's UI shader
+    -- while 8 offset white rim layers underneath ci.hcl_sil_core draw a smooth outer border
+    local core_black_argb = GetARGB(255, 0, 0, 0)
+    local rim_cardinal_argb = GetARGB(145, 245, 248, 255)
+    local rim_diag_argb = GetARGB(100, 245, 248, 255)
+
+    local spin_size = clamp_val(tonumber(get_ltt_mcm_value("spinner_size", 24)) or 24, 16, 64)
+    local raw_scale_mode = get_ltt_mcm_value("spinner_scale_mode", 1)
+    local spin_scale_mode = tonumber(raw_scale_mode) or ((tostring(raw_scale_mode) == "fit" or tostring(raw_scale_mode) == "2") and 2 or 1)
+    local spin_style = resolve_valid_spinner_style(get_ltt_mcm_value("spinner_style", "tarkov_like"))
+    local spin_opacity = clamp_val(tonumber(get_ltt_mcm_value("spinner_opacity", 90)) or 90, 10, 100)
+    local spin_alpha = clamp_val(m_floor((spin_opacity / 100.0) * 255), 25, 255)
+    local ratio = utils_xml.screen_ratio()
+
+    local frame = m_floor((time_global() * 26) / 1000) % 13
+    local col = frame % 4
+    local row = m_floor(frame / 4)
+    local fx1 = col * 128
+    local fy1 = row * 128
+    local frame_rect = Frect():set(fx1, fy1, fx1 + 128, fy1 + 128)
+
+    for _, ci in pairs(container.cell) do
+        local ci_t = type(ci)
+        -- Luabind class("UICellItem") instances have type(ci) == "userdata", not "table"
+        if (ci_t == "userdata" or ci_t == "table") and ci.cell and ci.cell:IsShown() and ci.ico then
+            local item_id = tonumber(ci.ID) or ci.ID
+            local is_unrevealed = ltt_active and item_id and hcl_loot.is_corpse_item_unrevealed(npc_id, item_id) or false
+            if is_unrevealed then
+                ci.ico:SetTextureColor(core_black_argb)
+                ci.hcl_ltt_silhouetted = true
+                safe_hide_widget(ci.shadow)
+                hide_unrevealed_cell_overlays(ci)
+
+                -- Lazily allocate 8 white rim statics followed by 1 jet-black core static on ci.cell
+                if not ci.hcl_sil_rims or not ci.hcl_sil_core then
+                    local cell_xml = ci.GetXML and ci:GetXML() or nil
+                    local pic_node = tostring(ci.path or "container") .. ":" .. tostring(ci.cx or "cell") .. ":pic"
+                    if cell_xml then
+                        ci.hcl_sil_rims = {}
+                        for i = 1, 8 do
+                            local ok_r, rim_st = pcall(cell_xml.InitStatic, cell_xml, pic_node, ci.cell)
+                            if ok_r and rim_st then
+                                ci.hcl_sil_rims[i] = rim_st
+                            end
+                        end
+                        local ok_c, core_st = pcall(cell_xml.InitStatic, cell_xml, pic_node, ci.cell)
+                        if ok_c and core_st then
+                            ci.hcl_sil_core = core_st
+                        end
+                    end
+                end
+
+                local sec = ci.section
+                local ico_pos = ci.ico:GetWndPos()
+                local base_x = ico_pos and ico_pos.x or 0
+                local base_y = ico_pos and ico_pos.y or 0
+                local ico_w = ci.ico:GetWidth()
+                local ico_h = ci.ico:GetHeight()
+
+                if sec and utils_xml and utils_xml.get_icons_texture and utils_xml.get_item_axis then
+                    local tex = utils_xml.get_icons_texture(sec)
+                    local item_rect = Frect():set(utils_xml.get_item_axis(sec, nil, true))
+                    if type(ci.hcl_sil_rims) == "table" then
+                        for i = 1, 8 do
+                            local rim = ci.hcl_sil_rims[i]
+                            local off = SIL_RIM_OFFSETS[i]
+                            if rim and off then
+                                rim:InitTexture(tex)
+                                rim:SetTextureRect(item_rect)
+                                rim:SetStretchTexture(true)
+                                rim:SetWndSize(vector2():set(ico_w, ico_h))
+                                rim:SetWndPos(vector2():set(base_x + off.dx, base_y + off.dy))
+                                rim:SetTextureColor(off.cardinal and rim_cardinal_argb or rim_diag_argb)
+                                rim:Show(true)
+                            end
+                        end
+                    end
+                    local core = ci.hcl_sil_core
+                    if core then
+                        core:InitTexture(tex)
+                        core:SetTextureRect(item_rect)
+                        core:SetStretchTexture(true)
+                        core:SetWndSize(vector2():set(ico_w, ico_h))
+                        core:SetWndPos(vector2():set(base_x, base_y))
+                        core:SetTextureColor(core_black_argb)
+                        core:Show(true)
+                    end
+                end
+
+                if p_mode == 2 then
+                    if not ci.hcl_ltt_spinner then
+                        if not ltt_spinner_xml then
+                            ltt_spinner_xml = CScriptXmlInit()
+                            ltt_spinner_xml:ParseFile("ui_xcvb_looting.xml")
+                        end
+                        if ltt_spinner_xml then
+                            local ok_sp, sp_wnd = pcall(function()
+                                return ltt_spinner_xml:InitStatic("cell_spinner", ci.cell)
+                            end)
+                            if ok_sp and sp_wnd then
+                                ci.hcl_ltt_spinner = sp_wnd
+                            end
+                        end
+                    end
+                    local sp = ci.hcl_ltt_spinner
+                    if sp then
+                        sp:InitTexture("ui\\loot_searching\\" .. spin_style .. "\\spinner_atlas")
+                        sp:SetStretchTexture(true)
+                        local cell_w = ci.cell:GetWidth()
+                        local cell_h = ci.cell:GetHeight()
+                        local size = spin_size
+                        if spin_scale_mode == 2 then
+                            size = clamp_val(m_min(ico_w, ico_h) * 0.5, 16, spin_size)
+                        end
+                        local sw = size * ratio
+                        local sh = size
+                        sp:SetWndSize(vector2():set(sw, sh))
+                        sp:SetWndPos(vector2():set((cell_w - sw) * 0.5, (cell_h - sh) * 0.5))
+                        sp:SetTextureColor(GetARGB(spin_alpha, 255, 255, 255))
+                        sp:SetTextureRect(frame_rect)
+                        sp:Show(true)
+                    end
+                else
+                    safe_hide_widget(ci.hcl_ltt_spinner)
+                end
+            else
+                if ci.hcl_ltt_silhouetted then
+                    ci.ico:SetTextureColor(GetARGB(255, 255, 255, 255))
+                    if ci.shadow and ci.shadow.Show then
+                        ci.shadow:Show(true)
+                        ci.shadow:SetTextureColor(GetARGB(200, 20, 20, 20))
+                    end
+                    ci.hcl_ltt_silhouetted = false
+                end
+                safe_hide_widget_table(ci.hcl_sil_rims)
+                safe_hide_widget(ci.hcl_sil_core)
+                safe_hide_widget(ci.hcl_ltt_spinner)
+            end
+        elseif ci_t == "userdata" or ci_t == "table" then
+            safe_hide_widget_table(ci.hcl_sil_rims)
+            safe_hide_widget(ci.hcl_sil_core)
+            safe_hide_widget(ci.hcl_ltt_spinner)
+        end
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Temporarily applies HCL MCM icon overlay masks over Utjan z_item_icon_info on Reinit
+-- while ensuring SortingPlus's native MCM priority list and Favorites/Junk order run
+-- and bypassing zzzz_loot_searching's fixed presort_grid so items auto-sort cleanly.
+-- Arguments: container (UICellContainer) - Target cell container
+--            objects (table) - Sparse map of {[item_id] = game_object}
+--            npc_id (number|nil) - Hovered corpse object ID
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+local function reinit_container_with_overlay_masks(container, objects, npc_id)
     if not container then return end
     container.sort_method = resolve_sorting_method()
     prewarm_sortingplus_info(objects)
@@ -234,8 +592,21 @@ local function reinit_container_with_overlay_masks(container, objects)
         _G.sort_by_kind_factory = passthrough_sort_by_kind_factory
     end
 
+    local orig_mcm_get = ui_mcm and ui_mcm.get or nil
+    if orig_mcm_get then
+        ui_mcm.get = function(key, ...)
+            if key == "loot_searching/presort_grid" then
+                return false
+            end
+            return orig_mcm_get(key, ...)
+        end
+    end
+
     local ok, err = pcall(container.Reinit, container, objects)
 
+    if orig_mcm_get then
+        ui_mcm.get = orig_mcm_get
+    end
     if orig_factory then
         _G.sort_by_kind_factory = orig_factory
     end
@@ -265,6 +636,8 @@ local function reinit_container_with_overlay_masks(container, objects)
 
     if not ok then
         z_probe(1, "HCL_UI", "UICellContainer:Reinit error: %s", tostring(err))
+    else
+        apply_looting_takes_time_cell_visuals(container, npc_id)
     end
 end
 
@@ -408,6 +781,7 @@ function HCL_HUD:InitControls()
     self.loot_container.GetDeferredEnabled = container_disable_deferred
     self.loot_container.FreeRoom = container_safe_free_room
     self.loot_container.GetSortOrder = container_get_sort_order
+    self.loot_container.FindSimilar = container_find_similar
     if self.loot_container.pad then
         self.loot_container.pad:Show(false)
     end
@@ -465,6 +839,13 @@ function HCL_HUD:InitControls()
     self.footer_text:SetVTextAlignment(1)
     self.footer_text:SetText("")
     self.footer:AttachChild(self.footer_text)
+
+    -- Looting Takes Time - REDUX HUD Indicator Bar (hud_icon == 2)
+    self.ltt_indicator_bar = CUIStatic()
+    self.ltt_indicator_bar:SetAutoDelete(true)
+    self.ltt_indicator_bar:SetStretchTexture(true)
+    self.ltt_indicator_bar:Show(false)
+    self.frame:AttachChild(self.ltt_indicator_bar)
 end
 
 ---------------------------------------------------------------------------------------
@@ -759,14 +1140,171 @@ function HCL_HUD:SyncCursorAndViewport(snap_immediately)
     self:UpdateScrollbar()
 
     local full_name = ""
-    if cur_obj then
+    local check_id = (cur_obj and cur_obj:id()) or ci.ID
+    local is_cursor_unrevealed = check_id and hcl_loot and hcl_loot.is_corpse_item_unrevealed and hcl_loot.is_corpse_item_unrevealed(rendered_corpse_id, check_id) or false
+    if is_cursor_unrevealed then
+        local hud_en = (get_ltt_mcm_value("hud_enable", true) ~= false)
+        local hud_ic = tonumber(get_ltt_mcm_value("hud_icon", 1)) or 1
+        if hud_en and hud_ic == 2 then
+            self.ltt_footer_searching_active = false
+            self:SetFooterItemText("")
+            self:PositionLttIndicatorBar(true)
+            return
+        elseif hud_en and hud_ic == 1 then
+            self.ltt_footer_searching_active = true
+            self.ltt_last_dot_step = nil
+            if self.ltt_indicator_bar and not self.ltt_searching_overlay_active then
+                self.ltt_indicator_bar:Show(false)
+            end
+            local base_lbl = game.translate_string("ui_mm_searching_corpse")
+            if not base_lbl or base_lbl == "ui_mm_searching_corpse" then
+                base_lbl = "Searching"
+            end
+            self:SetFooterItemText(base_lbl .. " . . .")
+            return
+        end
+        full_name = "..."
+    elseif cur_obj then
         full_name = (ui_item and ui_item.get_obj_name and ui_item.get_obj_name(cur_obj))
             or (ui_item and ui_item.get_sec_name and ui_item.get_sec_name(cur_obj:section()))
             or tostring(cur_obj:section())
     elseif ci.section then
         full_name = (ui_item and ui_item.get_sec_name and ui_item.get_sec_name(ci.section)) or tostring(ci.section)
     end
+    self.ltt_footer_searching_active = false
+    if self.ltt_indicator_bar and not self.ltt_searching_overlay_active then
+        self.ltt_indicator_bar:Show(false)
+    end
     self:SetFooterItemText(full_name)
+end
+
+---------------------------------------------------------------------------------------
+-- Configures and positions the Looting Takes Time - REDUX HUD indicator bar
+-- (hud_icon == 2, 256x32 13-frame atlas scaled to 140x21 by hud_indicator_scale).
+-- Arguments: in_footer (boolean) - True to center inside footer, false to center in loot window
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function HCL_HUD:PositionLttIndicatorBar(in_footer)
+    if not self.ltt_indicator_bar or not self.frame then
+        return
+    end
+    local ind_style = tostring(get_ltt_mcm_value("hud_indicator_style", "default") or "default"):gsub("^%s+", ""):gsub("%s+$", "")
+    if ind_style == "" then
+        ind_style = "default"
+    end
+    if type(getFS) == "function" then
+        local fs = getFS()
+        if fs and type(fs.exist) == "function" then
+            if not fs:exist("$game_textures$", "ui\\loot_indicator\\" .. ind_style .. "\\indicator_atlas.dds") then
+                ind_style = "default"
+            end
+        end
+    end
+    local ok_tex = pcall(self.ltt_indicator_bar.InitTexture, self.ltt_indicator_bar, "ui\\loot_indicator\\" .. ind_style .. "\\indicator_atlas")
+    if not ok_tex then
+        pcall(self.ltt_indicator_bar.InitTexture, self.ltt_indicator_bar, "ui\\loot_indicator\\default\\indicator_atlas")
+    end
+    local scale_pct = clamp_val(tonumber(get_ltt_mcm_value("hud_indicator_scale", 70)) or 70, 25, 150) / 100.0
+    local ratio = utils_xml.screen_ratio()
+    local bw = 140 * scale_pct * ratio
+    local bh = 21 * scale_pct
+    if in_footer and bh > (HCL_FOOTER_H - 4) then
+        local fit = (HCL_FOOTER_H - 4) / m_max(1, bh)
+        bw = bw * fit
+        bh = bh * fit
+    end
+    local win_w = self.frame:GetWidth()
+    local win_h = self.frame:GetHeight()
+    local bx = (win_w - bw) * 0.5
+    local by = in_footer and (win_h - HCL_FOOTER_H + ((HCL_FOOTER_H - bh) * 0.5) + 1) or (HCL_HEADER_H + ((win_h - HCL_HEADER_H - HCL_FOOTER_H - bh) * 0.5))
+    self.ltt_indicator_bar:SetWndSize(vector2():set(bw, bh))
+    self.ltt_indicator_bar:SetWndPos(vector2():set(bx, by))
+    self.ltt_indicator_bar:SetTextureRect(Frect():set(0, 0, 256, 32))
+    self.ltt_indicator_bar:Show(true)
+end
+
+---------------------------------------------------------------------------------------
+-- Updates Looting Takes Time - REDUX per-cell 26 FPS spinner atlas frames, animated
+-- HUD searching text (1..5 dots every 500ms) or indicator bar (hud_icon == 2), and
+-- background rummaging audio in PREVIEW and LOOTING.
+-- Arguments: none
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function HCL_HUD:UpdateLootingTakesTimeEffects()
+    local unrevealed = (hcl_loot and hcl_loot.get_unrevealed_item_count and hcl_loot.get_unrevealed_item_count()) or 0
+    local ltt_active = (unrevealed > 0) and hcl_loot and hcl_loot.is_looting_takes_time_active and hcl_loot.is_looting_takes_time_active() or false
+    if not ltt_active then
+        if self.ltt_bg_snd and self.ltt_bg_snd:playing() then
+            self.ltt_bg_snd:stop()
+        end
+        if self.ltt_indicator_bar and self.ltt_indicator_bar:IsShown() then
+            self.ltt_indicator_bar:Show(false)
+        end
+        if self.ltt_footer_searching_active then
+            self.ltt_footer_searching_active = false
+            if current_ui_state == "PREVIEW" and self.footer_text then
+                self.footer_text:SetText("")
+            end
+        end
+        return
+    end
+
+    local now_tg = time_global()
+
+    -- 1. Step 26 FPS per-cell spinner atlas (128x128) and HUD indicator bar atlas (256x32)
+    local frame = m_floor((now_tg * 26) / 1000) % 13
+    if frame ~= self.ltt_last_spinner_frame then
+        self.ltt_last_spinner_frame = frame
+        local col = frame % 4
+        local row = m_floor(frame / 4)
+        local x1 = col * 128
+        local y1 = row * 128
+        local rect = Frect():set(x1, y1, x1 + 128, y1 + 128)
+        if self.loot_container and self.loot_container.cell then
+            for _, ci in pairs(self.loot_container.cell) do
+                local ci_t = type(ci)
+                if (ci_t == "userdata" or ci_t == "table") and ci.hcl_ltt_spinner and ci.hcl_ltt_spinner:IsShown() then
+                    ci.hcl_ltt_spinner:SetTextureRect(rect)
+                end
+            end
+        end
+        if self.ltt_indicator_bar and self.ltt_indicator_bar:IsShown() then
+            local ix1 = col * 256
+            local iy1 = row * 32
+            self.ltt_indicator_bar:SetTextureRect(Frect():set(ix1, iy1, ix1 + 256, iy1 + 32))
+        end
+    end
+
+    -- 2. Animate "Searching . . ." (1..5 dots every 500ms) when hud_enable and hud_icon == 1
+    if get_ltt_mcm_value("hud_enable", true) ~= false and (tonumber(get_ltt_mcm_value("hud_icon", 1)) or 1) == 1 then
+        local dot_step = (m_floor(now_tg / 500) % 5) + 1
+        if dot_step ~= self.ltt_last_dot_step then
+            self.ltt_last_dot_step = dot_step
+            local base_lbl = get_ltt_searching_label()
+            local dots = s_rep(" .", dot_step)
+            if self.ltt_searching_overlay_active and self.status_text and self.status_text:IsShown() then
+                self.status_text:SetText(base_lbl .. dots)
+            end
+            if self.ltt_footer_searching_active and self.footer_text then
+                self.footer_text:SetText(base_lbl .. dots)
+            end
+        end
+    end
+
+    -- 3. Play background rummaging sound (looting\looting_1..12) if enabled in MCM
+    if get_ltt_mcm_value("sound_bg_enable", true) and db.actor then
+        if not self.ltt_bg_snd or not self.ltt_bg_snd:playing() then
+            local snd_idx = m_random(1, 12)
+            local ok_s, snd = pcall(sound_object, "looting\\looting_" .. tostring(snd_idx))
+            if ok_s and snd then
+                self.ltt_bg_snd = snd
+                self.ltt_bg_snd:play_at_pos(db.actor, vector():set(0, 0, 0), 0, sound_object.s2d)
+                self.ltt_bg_snd.volume = tonumber(get_ltt_mcm_value("sound_bg_enable_vol", 1.0)) or 1.0
+            end
+        end
+    elseif self.ltt_bg_snd and self.ltt_bg_snd:playing() then
+        self.ltt_bg_snd:stop()
+    end
 end
 
 ---------------------------------------------------------------------------------------
@@ -778,6 +1316,9 @@ end
 ---------------------------------------------------------------------------------------
 function HCL_HUD:Update()
     CUIScriptWnd.Update(self)
+    if current_ui_state == "PREVIEW" or current_ui_state == "LOOTING" then
+        self:UpdateLootingTakesTimeEffects()
+    end
     if current_ui_state == "LOOTING" and hcl_loot and hcl_loot.process_mouse_release_edges then
         hcl_loot.process_mouse_release_edges(false, false)
     end
@@ -830,6 +1371,11 @@ function HCL_HUD:RenderStatusOverlay(npc, mode)
     self.sb_track:Show(false)
     self.sb_thumb:Show(false)
     self.footer_text:SetText("")
+    if self.ltt_indicator_bar then
+        self.ltt_indicator_bar:Show(false)
+    end
+    self.ltt_searching_overlay_active = false
+    self.ltt_footer_searching_active = false
 
     if mode == "CLAIMED" then
         self.status_text:SetTextColor(GetARGB(255, 255, 225, 35))
@@ -857,7 +1403,13 @@ function HCL_HUD:RenderLootGrid(npc, objects_map, is_looting)
     local win_w, loot_x, loot_y, loot_w, loot_h = self:ApplyLayout(HCL_UI_MAIN_Y_MAX)
     self:PopulateHeader(npc, win_w)
     self.status_text:Show(false)
+    self.ltt_searching_overlay_active = false
+    self.ltt_footer_searching_active = false
+    if self.ltt_indicator_bar then
+        self.ltt_indicator_bar:Show(false)
+    end
 
+    local npc_id = npc and npc:id() or nil
     local cont = self.loot_container
     if cont and cont.prof then
         local prev_scroll = self.scroll_pos or (cont.scroll and cont.scroll:GetCurrentScrollPos()) or 0
@@ -868,7 +1420,8 @@ function HCL_HUD:RenderLootGrid(npc, objects_map, is_looting)
         if prev_cols ~= cont.cols and cont.grid and cont.cols then
             if cont.cell then
                 for _, ci in pairs(cont.cell) do
-                    if type(ci) == "table" then
+                    local ci_t = type(ci)
+                    if ci_t == "userdata" or ci_t == "table" then
                         ci.area = nil
                     end
                 end
@@ -888,7 +1441,7 @@ function HCL_HUD:RenderLootGrid(npc, objects_map, is_looting)
             end
         end
 
-        reinit_container_with_overlay_masks(cont, objects_map)
+        reinit_container_with_overlay_masks(cont, objects_map, npc_id)
 
         local content_h = m_max(43, cont:Scroll_GetHeight(0) or 0)
         local desired_h = HCL_HEADER_H + HCL_FOOTER_H + (2 * HCL_LOOT_PAD) + content_h
@@ -919,6 +1472,24 @@ function HCL_HUD:RenderLootGrid(npc, objects_map, is_looting)
         end
     end
 
+    local unrevealed = (hcl_loot and hcl_loot.get_unrevealed_item_count and hcl_loot.get_unrevealed_item_count()) or 0
+    local hud_en = (get_ltt_mcm_value("hud_enable", true) ~= false)
+    local hud_ic = tonumber(get_ltt_mcm_value("hud_icon", 1)) or 1
+    self.ltt_last_spinner_frame = nil
+
+    if next(objects_map) == nil and unrevealed > 0 then
+        self.ltt_searching_overlay_active = true
+        self.ltt_last_dot_step = nil
+        if hud_en and hud_ic == 2 then
+            self:PositionLttIndicatorBar(false)
+        elseif hud_en then
+            local base_lbl = get_ltt_searching_label()
+            self.status_text:SetTextColor(GetARGB(220, 225, 230, 235))
+            self.status_text:SetText(base_lbl .. " . . .")
+            self.status_text:Show(true)
+        end
+    end
+
     if hcl_loot and hcl_loot.sync_grid_from_container then
         hcl_loot.sync_grid_from_container(cont, objects_map)
     end
@@ -928,7 +1499,19 @@ function HCL_HUD:RenderLootGrid(npc, objects_map, is_looting)
     else
         self.cursor_box:Show(false)
         self.cursor_initialized = false
-        self.footer_text:SetText("")
+        if unrevealed > 0 and hud_en and not self.ltt_searching_overlay_active then
+            if hud_ic == 2 then
+                self.footer_text:SetText("")
+                self:PositionLttIndicatorBar(true)
+            else
+                self.ltt_footer_searching_active = true
+                self.ltt_last_dot_step = nil
+                local base_lbl = get_ltt_searching_label()
+                self:SetFooterItemText(base_lbl .. " . . .")
+            end
+        else
+            self.footer_text:SetText("")
+        end
         self:UpdateScrollbar()
     end
 end
@@ -962,6 +1545,14 @@ function HCL_HUD:HideHud()
     if self.frame then
         self.frame:Show(false)
     end
+    if self.ltt_bg_snd and self.ltt_bg_snd:playing() then
+        self.ltt_bg_snd:stop()
+    end
+    if self.ltt_indicator_bar then
+        self.ltt_indicator_bar:Show(false)
+    end
+    self.ltt_searching_overlay_active = false
+    self.ltt_footer_searching_active = false
     self.cursor_initialized = false
     self.scroll_pos = 0
 end
@@ -1005,6 +1596,9 @@ function tick(corpse_status, cb_status, npc)
     -- Priority 1: HIDDEN (corpse_check_status = INVALID or delay timer still pending)
     if corpse_status == "INVALID" or not npc or (corpse_status == "VALID" and cb_status ~= "PREVIEW" and cb_status ~= "LOOT") then
         if current_ui_state ~= "HIDDEN" then
+            if hcl_loot and hcl_loot.pause_looting_takes_time_search then
+                hcl_loot.pause_looting_takes_time_search()
+            end
             if hud_instance then
                 hud_instance:HideHud()
             end
@@ -1021,14 +1615,17 @@ function tick(corpse_status, cb_status, npc)
 
     -- Priority 2: CLAIMED
     if corpse_status == "CLAIMED" then
-        if current_ui_state ~= "CLAIMED" or rendered_corpse_id ~= npc_id or ui_dirty then
+        local state_changed = (current_ui_state ~= "CLAIMED" or rendered_corpse_id ~= npc_id)
+        if state_changed or ui_dirty then
             local hud = get_hud_instance()
             current_ui_state = "CLAIMED"
             hud:RenderStatusOverlay(npc, "CLAIMED")
             rendered_corpse_id = npc_id
             rendered_inv_hash = nil
             ui_dirty = false
-            z_probe(2, "HCL_UI", "Transition -> CLAIMED (corpse_id=%d)", npc_id)
+            if state_changed then
+                z_probe(2, "HCL_UI", "Transition -> CLAIMED (corpse_id=%d)", npc_id)
+            end
         end
         return
     end
@@ -1040,7 +1637,8 @@ function tick(corpse_status, cb_status, npc)
 
     -- Priority 3: EMPTY (VALID and (PREVIEW or LOOT) and corpse is empty)
     if item_count == 0 then
-        if current_ui_state ~= "EMPTY" or rendered_corpse_id ~= npc_id or rendered_inv_hash ~= inv_hash or ui_dirty then
+        local state_changed = (current_ui_state ~= "EMPTY" or rendered_corpse_id ~= npc_id)
+        if state_changed or rendered_inv_hash ~= inv_hash or ui_dirty then
             local hud = get_hud_instance()
             current_ui_state = "EMPTY"
             hud:RenderStatusOverlay(npc, "EMPTY")
@@ -1050,14 +1648,17 @@ function tick(corpse_status, cb_status, npc)
             rendered_corpse_id = npc_id
             rendered_inv_hash = inv_hash
             ui_dirty = false
-            z_probe(2, "HCL_UI", "Transition -> EMPTY (corpse_id=%d)", npc_id)
+            if state_changed then
+                z_probe(2, "HCL_UI", "Transition -> EMPTY (corpse_id=%d)", npc_id)
+            end
         end
         return
     end
 
     -- Priority 4: PREVIEW
     if cb_status == "PREVIEW" then
-        if current_ui_state ~= "PREVIEW" or rendered_corpse_id ~= npc_id or rendered_inv_hash ~= inv_hash or ui_dirty then
+        local state_changed = (current_ui_state ~= "PREVIEW" or rendered_corpse_id ~= npc_id)
+        if state_changed or rendered_inv_hash ~= inv_hash or ui_dirty then
             local hud = get_hud_instance()
             if rendered_corpse_id ~= npc_id then
                 hud.scroll_pos = 0
@@ -1068,7 +1669,9 @@ function tick(corpse_status, cb_status, npc)
             rendered_corpse_id = npc_id
             rendered_inv_hash = inv_hash
             ui_dirty = false
-            z_probe(2, "HCL_UI", "Transition -> PREVIEW (corpse_id=%d, items=%d)", npc_id, item_count)
+            if state_changed then
+                z_probe(2, "HCL_UI", "Transition -> PREVIEW (corpse_id=%d, items=%d)", npc_id, item_count)
+            end
         end
         return
     end
@@ -1076,8 +1679,8 @@ function tick(corpse_status, cb_status, npc)
     -- Priority 5: LOOTING
     if cb_status == "LOOT" then
         local hud = get_hud_instance()
-        local state_changed = (current_ui_state ~= "LOOTING")
-        if state_changed or rendered_corpse_id ~= npc_id or rendered_inv_hash ~= inv_hash or ui_dirty then
+        local state_changed = (current_ui_state ~= "LOOTING" or rendered_corpse_id ~= npc_id)
+        if state_changed or rendered_inv_hash ~= inv_hash or ui_dirty then
             if rendered_corpse_id ~= npc_id then
                 hud.scroll_pos = 0
                 hud.cursor_initialized = false
@@ -1087,7 +1690,9 @@ function tick(corpse_status, cb_status, npc)
             rendered_corpse_id = npc_id
             rendered_inv_hash = inv_hash
             ui_dirty = false
-            z_probe(2, "HCL_UI", "Transition -> LOOTING (corpse_id=%d, items=%d)", npc_id, item_count)
+            if state_changed then
+                z_probe(2, "HCL_UI", "Transition -> LOOTING (corpse_id=%d, items=%d)", npc_id, item_count)
+            end
         end
     end
 end

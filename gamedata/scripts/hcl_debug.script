@@ -1,0 +1,131 @@
+local debug_level = 0 -- 0=OFF, 1=ERROR, 2=WARN/STATE, 3=VERBOSE
+local s_format = string.format
+local t_concat = table.concat
+
+-- [SYSTEM] HCL_Debug
+
+local LEVEL_TAGS = {
+    [1] = "ERROR",
+    [2] = "WARN/STATE",
+    [3] = "VERBOSE",
+}
+
+local module_levels = {
+    HCL_MCM  = nil,
+    HCL_Main = nil,
+    HCL_Loot = nil,
+    HCL_UI   = nil,
+}
+
+---------------------------------------------------------------------------------------
+-- Resolves the active debug level for a specific station/module or the master default.
+-- Arguments: station (string|nil) - Optional system or module identifier
+-- Returns: (number) - Active debug threshold (0=OFF, 1=ERROR, 2=WARN/STATE, 3=VERBOSE)
+---------------------------------------------------------------------------------------
+function get_debug_level(station)
+    if station and module_levels[station] ~= nil then
+        return module_levels[station]
+    end
+    return debug_level
+end
+
+---------------------------------------------------------------------------------------
+-- Sets the master debug level or a station-specific debug level override at runtime.
+-- Arguments: level (number|nil) - New threshold (0..3), or nil to clear station override
+--            station (string|nil) - Optional station name; if nil, updates master level
+-- Returns: (number) - Resulting effective debug level
+---------------------------------------------------------------------------------------
+function set_debug_level(level, station)
+    if station then
+        if level == nil then
+            module_levels[station] = nil
+        else
+            local n = tonumber(level) or 0
+            if n < 0 then n = 0 elseif n > 3 then n = 3 end
+            module_levels[station] = n
+        end
+        return get_debug_level(station)
+    end
+    local n = tonumber(level) or 0
+    if n < 0 then n = 0 elseif n > 3 then n = 3 end
+    debug_level = n
+    return debug_level
+end
+
+---------------------------------------------------------------------------------------
+-- Safely formats any Lua value or shallow table into a human-readable telemetry string
+-- without indexing userdata or throwing on non-standard metamethods.
+-- Arguments: val (any) - Value to summarize for debug output
+-- Returns: (string) - Safe string representation
+---------------------------------------------------------------------------------------
+function format_value(val)
+    local vt = type(val)
+    if vt == "nil" or vt == "boolean" or vt == "number" then
+        return tostring(val)
+    elseif vt == "string" then
+        return val
+    elseif vt == "table" then
+        local parts = {}
+        local count = 0
+        for k, v in pairs(val) do
+            count = count + 1
+            if count > 8 then
+                parts[count] = "..."
+                break
+            end
+            parts[count] = tostring(k) .. "=" .. tostring(v)
+        end
+        return "{" .. t_concat(parts, ", ") .. "}"
+    end
+    return "<" .. vt .. ">"
+end
+
+---------------------------------------------------------------------------------------
+-- Outputs formatted chokepoint diagnostic telemetry to the X-Ray console log.
+-- Arguments: level (number) - Severity threshold (1=ERROR, 2=WARN/STATE, 3=VERBOSE)
+--            station (string) - Name of the executing system or function
+--            msg (string) - Format string or message
+--            ... (any) - Optional format arguments passed to string.format
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function z_probe(level, station, msg, ...)
+    local threshold = get_debug_level(station)
+    if (tonumber(level) or 0) > threshold then
+        return
+    end
+    local ok, formatted = pcall(string.format, msg, ...)
+    printf("[Hover Corpse Loot] | %s | %s", tostring(station), ok and formatted or tostring(msg))
+end
+
+---------------------------------------------------------------------------------------
+-- Emits level-1 (ERROR) chokepoint telemetry through the centralized debug hub.
+-- Arguments: station (string) - Name of the executing system or function
+--            msg (string) - Format string or message
+--            ... (any) - Optional format arguments
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function log_error(station, msg, ...)
+    z_probe(1, station, msg, ...)
+end
+
+---------------------------------------------------------------------------------------
+-- Emits level-2 (WARN/STATE) chokepoint telemetry through the centralized debug hub.
+-- Arguments: station (string) - Name of the executing system or function
+--            msg (string) - Format string or message
+--            ... (any) - Optional format arguments
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function log_state(station, msg, ...)
+    z_probe(2, station, msg, ...)
+end
+
+---------------------------------------------------------------------------------------
+-- Emits level-3 (VERBOSE) chokepoint telemetry through the centralized debug hub.
+-- Arguments: station (string) - Name of the executing system or function
+--            msg (string) - Format string or message
+--            ... (any) - Optional format arguments
+-- Returns: (nil)
+---------------------------------------------------------------------------------------
+function log_verbose(station, msg, ...)
+    z_probe(3, station, msg, ...)
+end

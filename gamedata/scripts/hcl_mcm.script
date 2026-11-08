@@ -10,6 +10,9 @@ local m_floor = math.floor
 -- Returns: (nil)
 ---------------------------------------------------------------------------------------
 local function z_probe(level, station, msg, ...)
+    if hcl_debug and hcl_debug.z_probe then
+        return hcl_debug.z_probe(level, station, msg, ...)
+    end
     if level > debug_level then return end
     local ok, formatted = pcall(string.format, msg, ...)
     printf("[Hover Corpse Loot] | %s | %s", tostring(station), ok and formatted or tostring(msg))

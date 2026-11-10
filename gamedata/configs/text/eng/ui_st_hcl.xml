@@ -3,25 +3,33 @@
     <string id="ui_mcm_menu_hcl">
         <text>Hover Corpse Loot</text>
     </string>
-    <string id="ui_mcm_hcl_tab_ui_options">
-        <text>UI Options</text>
+    <string id="ui_mcm_hcl">
+        <text>Hover Corpse Loot</text>
     </string>
-    <string id="ui_mcm_hcl_tab_ui_controls">
-        <text>UI Controls</text>
+    <string id="ui_mcm_hcl_title">
+        <text>Hover Corpse Loot</text>
+    </string>
+    <string id="ui_mcm_title_hcl">
+        <text>Hover Corpse Loot</text>
     </string>
     <string id="ui_mcm_menu_ui_options">
         <text>UI Options</text>
     </string>
+    <string id="ui_mcm_hcl_ui_options">
+        <text>UI Options</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_title">
+        <text>Hover Corpse Loot - UI Options</text>
+    </string>
     <string id="ui_mcm_menu_ui_controls">
         <text>UI Controls</text>
     </string>
-    <string id="ui_mcm_hcl_title">
-        <text>Hover Corpse Loot - UI Options</text>
+    <string id="ui_mcm_hcl_ui_controls">
+        <text>UI Controls</text>
     </string>
-    <string id="ui_mcm_hcl_controls_title">
+    <string id="ui_mcm_hcl_ui_controls_title">
         <text>Hover Corpse Loot - UI Controls</text>
     </string>
-
     <string id="ui_mcm_hcl_ui_options_hcl_toggle">
         <text>Toggle Hover Corpse Loot</text>
     </string>
@@ -55,7 +63,6 @@
     <string id="ui_mcm_hcl_ui_options_hcl_max_dist">
         <text>Maximum distance from corpse to activate Hover UI</text>
     </string>
-
     <string id="ui_mcm_hcl_ui_controls_hcl_bg_scolor">
         <text>Item icon selection background color</text>
     </string>
@@ -83,7 +90,6 @@
     <string id="ui_mcm_hcl_ui_controls_hcl_wpn_prt_min_cond">
         <text>Minimum weapon parts condition to Strip</text>
     </string>
-
     <string id="ui_mcm_lst_hcl_amber">
         <text>Amber</text>
     </string>
@@ -96,20 +102,22 @@
     <string id="ui_mcm_lst_hcl_green">
         <text>Green</text>
     </string>
-    <string id="ui_mcm_lst_hcl_item_kind">
-        <text>Item Kind</text>
-    </string>
     <string id="ui_mcm_lst_hcl_exact_row">
         <text>Exact Row</text>
     </string>
-
-    <string id="st_hcl_claimed">
-        <text>CLAIMED</text>
+    <string id="ui_mcm_lst_hcl_item_kind">
+        <text>Item Kind</text>
     </string>
-    <string id="st_hcl_empty">
-        <text>EMPTY</text>
-    </string>
-    <string id="st_hcl_looted">
+    <string id="st_hcl_looted_tag">
         <text>[LOOTED]</text>
+    </string>
+    <string id="st_hcl_claimed_status">
+        <text>&lt;CLAIMED&gt;</text>
+    </string>
+    <string id="st_hcl_empty_status">
+        <text>&lt;EMPTY&gt;</text>
+    </string>
+    <string id="st_hcl_field_strip_header">
+        <text>Field Stripped:</text>
     </string>
 </string_table>

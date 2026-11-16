@@ -1,15 +1,15 @@
 -- [SYSTEM] HCL_MCM
 
--- @z [HCL_MCM] helper:z_probe
--- @z_func: HCL_MCM.z_probe [internal]
-local function z_probe(func_name, fmt, ...)
-    if hcl_debug and hcl_debug.z_probe then
-        hcl_debug.z_probe(func_name, fmt, ...)
-    end
-end
+local hides_gun_cond = false
 
--- @z [HCL_MCM] data:UI Options
-local defaults = {
+-- @z [HCL_MCM] data:Runtime Cache | bind:hcl_cond_gamma_gun_hide
+local runtime_cache = {
+    hides_gun_cond = false,
+    hooks_installed = false,
+    config_cache = {},
+}
+
+local DEFAULTS = {
     hcl_toggle = true,
     hcl_cond = true,
     hcl_parts_cond = true,
@@ -24,18 +24,12 @@ local defaults = {
     hcl_bg_scolor = "Amber",
     hcl_bg_scolor_brightness = 75,
     hcl_s_acceleration = 1.0,
-    hcl_univ_modifier = DIK_keys and DIK_keys.DIK_LMENU or 56,
-    hcl_jump_type = "Exact Row",
+    hcl_univ_modifier = 56,
+    hcl_jump_type = "ExactRow",
     hcl_wpn_prt_min_cond = 60,
 }
 
--- @z [HCL_MCM] data:UI Controls
-local config = {}
-for k, v in pairs(defaults) do
-    config[k] = v
-end
-
-local mcm_key_paths = {
+local MCM_PATHS = {
     hcl_toggle = "hcl/ui_options/hcl_toggle",
     hcl_cond = "hcl/ui_options/hcl_cond",
     hcl_parts_cond = "hcl/ui_options/hcl_parts_cond",
@@ -55,153 +49,248 @@ local mcm_key_paths = {
     hcl_wpn_prt_min_cond = "hcl/ui_controls/hcl_wpn_prt_min_cond",
 }
 
--- Pure literal initialization at top-level module scope; never index grok_gun_no_condition_text
--- or z_item_icon_info at top-level while ui_mcm.gather_options() runs in the Main Menu.
-local gamma_hides_gun_cond = false
-
--- @z [HCL_MCM] rule:UI Options | bind:hcl_cond_gamma_gun_hide
--- @z_func: HCL_MCM.get_config [export:output]
-function get_config(key)
-    if key == nil then
-        return config
+-- @z_func: HCL_MCM.z_probe [internal:shared]
+local function z_probe(level, func_name, fmt, ...)
+    if hcl_debug and hcl_debug.z_probe then
+        hcl_debug.z_probe(level, func_name, fmt, ...)
     end
-    local val = config[key]
-    if val ~= nil then
-        return val
-    end
-    return defaults[key]
 end
 
--- @z [HCL_MCM] helper:get | bind:hcl_cond_gamma_gun_hide
--- @z_func: HCL_MCM.get [export:output]
+-- @z_func: HCL_MCM.normalize_key [internal:shared]
+local function normalize_key(key)
+    if not key then
+        return nil
+    end
+    if DEFAULTS[key] ~= nil then
+        return key
+    end
+    local slash_leaf = string.match(key, "([^/]+)$")
+    if slash_leaf and DEFAULTS[slash_leaf] ~= nil then
+        return slash_leaf
+    end
+    return key
+end
+
+-- @z_func: HCL_MCM.get_config [export:output:get_config]
+function get_config(key)
+    local short_key = normalize_key(key)
+    if not short_key then
+        return nil
+    end
+    local cached = runtime_cache.config_cache[short_key]
+    if cached ~= nil then
+        return cached
+    end
+    local val = nil
+    local mcm_path = MCM_PATHS[short_key]
+    if ui_mcm and ui_mcm.get and mcm_path then
+        val = ui_mcm.get(mcm_path)
+    end
+    if val == nil then
+        val = DEFAULTS[short_key]
+        if short_key == "hcl_univ_modifier" and DIK_keys and DIK_keys.DIK_LMENU then
+            val = DIK_keys.DIK_LMENU
+        end
+    end
+    if short_key == "hcl_jump_type" then
+        if val == "Exact Row" then
+            val = "ExactRow"
+        elseif val == "Item Kind" then
+            val = "ItemKind"
+        end
+    end
+    runtime_cache.config_cache[short_key] = val
+    return val
+end
+
+-- @z_func: HCL_MCM.get [export:output:get]
 function get(key)
     return get_config(key)
 end
 
--- @z [HCL_MCM] rule:is_gamma_gun_cond_hidden | bind:hcl_cond_gamma_gun_hide
--- @z_func: HCL_MCM.is_gamma_gun_cond_hidden [export:output]
+-- @z_func: HCL_MCM.is_gamma_gun_cond_hidden [export:output:is_gamma_gun_cond_hidden] | bind:hcl_cond_gamma_gun_hide
 function is_gamma_gun_cond_hidden()
-    return gamma_hides_gun_cond == true
+    if hides_gun_cond then
+        return true
+    end
+    return false
 end
 
--- @z [HCL_MCM] rule:should_show_cond | bind:hcl_cond_gamma_gun_hide
--- @z_func: HCL_MCM.should_show_cond [export:output]
-function should_show_cond(obj, clsid)
+-- @z_func: HCL_MCM.should_show_item_condition [export:output:should_show_item_condition] | bind:hcl_cond_gamma_gun_hide
+function should_show_item_condition(obj)
     if not get_config("hcl_cond") then
         return false
     end
-    local has_valid_obj = (obj ~= nil and type(obj) == "userdata" and type(obj.clsid) == "function")
-    if gamma_hides_gun_cond and (has_valid_obj or clsid ~= nil) then
-        -- Suppress overall condition percentage text on non-melee firearms when
-        -- grok_gun_no_condition_text (z_item_icon_info.Add_Condition_Text / Add_Weapon_Name) is active.
-        if IsWeapon(obj, clsid) and not IsMelee(obj, clsid) then
-            return false
-        end
+    if not obj then
+        return false
+    end
+    if hides_gun_cond and IsWeapon(obj) and not IsMelee(obj) then
+        return false
     end
     return true
 end
 
--- @z [HCL_MCM] helper:refresh_mcm_values
--- @z_func: HCL_MCM.refresh_mcm_values [export:callback]
-function refresh_mcm_values()
-    if not ui_mcm then
-        return
-    end
-    for key, path in pairs(mcm_key_paths) do
-        local v = ui_mcm.get(path)
-        if v ~= nil then
-            if key == "hcl_jump_type" then
-                if v == "ExactRow" then
-                    v = "Exact Row"
-                elseif v == "ItemKind" then
-                    v = "Item Kind"
-                end
-            end
-            config[key] = v
-        end
-    end
-    z_probe("refresh_mcm_values", "toggle=%s delay=%s max_dist=%s", tostring(config.hcl_toggle), tostring(config.hcl_ui_delay), tostring(config.hcl_max_dist))
+-- @z_func: HCL_MCM.build_ui_options_tab [internal:shared] | bind:hcl_cond_gamma_gun_hide
+local function build_ui_options_tab()
+    return {
+        id = "ui_options",
+        sh = true,
+        gr = {
+            { id = "title", type = "slide", link = "ui_options_slider_player", text = "ui_mcm_hcl_title", size = {512, 50}, spacing = 20 },
+            { id = "hcl_toggle", type = "check", val = 1, def = true },
+            { id = "divider_main", type = "line" },
+            { id = "hcl_cond", type = "check", val = 1, def = true },
+            { id = "hcl_parts_cond", type = "check", val = 1, def = true },
+            { id = "hcl_parts_repair_type", type = "check", val = 1, def = true },
+            { id = "hcl_patches_on_armor", type = "check", val = 1, def = true },
+            { id = "divider_layout", type = "line" },
+            { id = "hcl_x_offset", type = "track", val = 2, min = 0, max = 500, step = 5, def = 150 },
+            { id = "hcl_y_offset", type = "track", val = 2, min = 0, max = 250, step = 5, def = 0 },
+            { id = "hcl_ui_main_x", type = "track", val = 2, min = 200, max = 500, step = 10, def = 300 },
+            { id = "hcl_ui_opacity", type = "track", val = 2, min = 10, max = 100, step = 1, def = 75 },
+            { id = "hcl_ui_delay", type = "track", val = 2, min = 100, max = 500, step = 10, def = 200 },
+            { id = "hcl_max_dist", type = "track", val = 2, min = 2.0, max = 5.0, step = 0.5, prec = 1, def = 2.0 },
+        },
+    }
 end
 
--- @z [HCL_MCM] dispatcher:on_option_change
--- @z_func: HCL_MCM.on_option_change [export:callback]
-function on_option_change(mcm)
-    if mcm then
-        refresh_mcm_values()
-    end
+-- @z_func: HCL_MCM.build_ui_controls_tab [internal:shared] | bind:hcl_cond_gamma_gun_hide
+local function build_ui_controls_tab()
+    local default_mod_key = (DIK_keys and DIK_keys.DIK_LMENU) or 56
+    return {
+        id = "ui_controls",
+        sh = true,
+        gr = {
+            { id = "title", type = "slide", link = "ui_options_slider_player", text = "ui_mcm_hcl_title", size = {512, 50}, spacing = 20 },
+            {
+                id = "hcl_bg_scolor",
+                type = "list",
+                val = 0,
+                def = "Amber",
+                content = {
+                    { "Amber", "hcl_amber" },
+                    { "Cyan", "hcl_cyan" },
+                    { "White", "hcl_white" },
+                    { "Green", "hcl_green" },
+                },
+            },
+            { id = "hcl_bg_scolor_brightness", type = "track", val = 2, min = 1, max = 100, step = 1, def = 75 },
+            { id = "hcl_s_acceleration", type = "track", val = 2, min = 1.0, max = 5.0, step = 0.1, prec = 1, def = 1.0 },
+            { id = "hcl_univ_modifier", type = "key_bind", val = 2, def = default_mod_key },
+            {
+                id = "hcl_jump_type",
+                type = "list",
+                val = 0,
+                def = "ExactRow",
+                content = {
+                    { "ExactRow", "hcl_exact_row" },
+                    { "ItemKind", "hcl_item_kind" },
+                },
+            },
+            { id = "hcl_wpn_prt_min_cond", type = "track", val = 2, min = 1, max = 100, step = 1, def = 60 },
+        },
+    }
 end
 
--- @z [HCL_MCM] dispatcher:on_mcm_load | bind:hcl_cond_gamma_gun_hide
--- @z_func: HCL_MCM.on_mcm_load [export:output]
+-- @z_func: HCL_MCM.on_mcm_load [export:callback:on_mcm_load] | bind:hcl_cond_gamma_gun_hide
 function on_mcm_load()
     local op = {
         id = "hcl",
         gr = {
-            {
-                id = "ui_options",
-                sh = true,
-                gr = {
-                    { id = "title", type = "slide", link = "ui_options_slider_player", text = "ui_mcm_hcl_title", size = { 512, 50 }, spacing = 20 },
-                    { id = "hcl_toggle", type = "check", val = 1, def = defaults.hcl_toggle },
-                    { id = "divider_1", type = "line" },
-                    { id = "hcl_cond", type = "check", val = 1, def = defaults.hcl_cond },
-                    { id = "hcl_parts_cond", type = "check", val = 1, def = defaults.hcl_parts_cond },
-                    { id = "hcl_parts_repair_type", type = "check", val = 1, def = defaults.hcl_parts_repair_type },
-                    { id = "hcl_patches_on_armor", type = "check", val = 1, def = defaults.hcl_patches_on_armor },
-                    { id = "divider_2", type = "line" },
-                    { id = "hcl_x_offset", type = "track", val = 2, min = 0, max = 500, step = 5, def = defaults.hcl_x_offset },
-                    { id = "hcl_y_offset", type = "track", val = 2, min = 0, max = 250, step = 5, def = defaults.hcl_y_offset },
-                    { id = "hcl_ui_main_x", type = "track", val = 2, min = 200, max = 500, step = 10, def = defaults.hcl_ui_main_x },
-                    { id = "hcl_ui_opacity", type = "track", val = 2, min = 10, max = 100, step = 1, def = defaults.hcl_ui_opacity },
-                    { id = "hcl_ui_delay", type = "track", val = 2, min = 100, max = 500, step = 10, def = defaults.hcl_ui_delay },
-                    { id = "hcl_max_dist", type = "track", val = 2, min = 2, max = 5, step = 0.5, def = defaults.hcl_max_dist },
-                },
-            },
-            {
-                id = "ui_controls",
-                sh = true,
-                gr = {
-                    { id = "title", type = "slide", link = "ui_options_slider_player", text = "ui_mcm_hcl_title", size = { 512, 50 }, spacing = 20 },
-                    {
-                        id = "hcl_bg_scolor",
-                        type = "list",
-                        val = 0,
-                        def = defaults.hcl_bg_scolor,
-                        content = {
-                            { "Amber", "hcl_amber" },
-                            { "Cyan", "hcl_cyan" },
-                            { "White", "hcl_white" },
-                            { "Green", "hcl_green" },
-                        },
-                    },
-                    { id = "hcl_bg_scolor_brightness", type = "track", val = 2, min = 1, max = 100, step = 1, def = defaults.hcl_bg_scolor_brightness },
-                    { id = "hcl_s_acceleration", type = "track", val = 2, min = 1.0, max = 5.0, step = 0.1, def = defaults.hcl_s_acceleration },
-                    { id = "hcl_univ_modifier", type = "key_bind", val = 2, def = defaults.hcl_univ_modifier },
-                    {
-                        id = "hcl_jump_type",
-                        type = "list",
-                        val = 0,
-                        def = "ExactRow",
-                        content = {
-                            { "ExactRow", "hcl_exact_row" },
-                            { "ItemKind", "hcl_item_kind" },
-                        },
-                    },
-                    { id = "hcl_wpn_prt_min_cond", type = "track", val = 2, min = 1, max = 100, step = 1, def = defaults.hcl_wpn_prt_min_cond },
-                },
-            },
+            build_ui_options_tab(),
+            build_ui_controls_tab(),
         },
     }
     return op
 end
 
--- @z [HCL_MCM] dispatcher:on_game_start | bind:hcl_cond_gamma_gun_hide
--- @z_func: HCL_MCM.on_game_start [export:callback]
-function on_game_start()
-    gamma_hides_gun_cond = (_G.grok_gun_no_condition_text ~= nil)
-    if _G.z_item_icon_info and _G.z_item_icon_info.Add_Condition_Text and _G.z_item_icon_info.Add_Weapon_Name then
-        z_probe("on_game_start", "z_item_icon_info detected (gamma_hides_gun_cond=%s)", tostring(gamma_hides_gun_cond))
+-- @z_func: HCL_MCM.on_option_change [export:callback:on_option_change]
+function on_option_change()
+    runtime_cache.config_cache = {}
+    z_probe(2, "hcl_mcm.on_option_change", "Cleared MCM config_cache after option update")
+end
+
+-- @z_func: HCL_MCM.install_icon_hooks [internal:Runtime Cache] | bind:hcl_cond_gamma_gun_hide
+local function install_icon_hooks()
+    if runtime_cache.hooks_installed then
+        return
     end
-    refresh_mcm_values()
+    runtime_cache.hooks_installed = true
+
+    if z_item_icon_info and z_item_icon_info.Add_Condition_Text then
+        local orig_add_cond_text = z_item_icon_info.Add_Condition_Text
+        z_item_icon_info.Add_Condition_Text = function(self_cell, xml, obj, sec, clsid)
+            if self_cell and self_cell.container and self_cell.container.ID == "hcl_loot_bag" then
+                if not should_show_item_condition(obj) then
+                    if self_cell.cond_text then
+                        self_cell.cond_text:Show(false)
+                    end
+                    if self_cell.cond_text_bg then
+                        self_cell.cond_text_bg:Show(false)
+                    end
+                    return
+                end
+            end
+            return orig_add_cond_text(self_cell, xml, obj, sec, clsid)
+        end
+    end
+
+    if utils_ui and utils_ui.UICellItem and utils_ui.UICellItem.Add_ProgressBar then
+        local orig_add_progress_bar = utils_ui.UICellItem.Add_ProgressBar
+        utils_ui.UICellItem.Add_ProgressBar = function(self_cell, xml, obj, sec, clsid)
+            if self_cell and self_cell.container and self_cell.container.ID == "hcl_loot_bag" then
+                local prev_og = self_cell.disable_bar_og
+                local prev_dis = self_cell.disable_bar
+                if not should_show_item_condition(obj) then
+                    -- Preserve disable_bar_og=true only for this suppressed cell so Add_Parts_Bars still runs
+                    self_cell.disable_bar_og = true
+                    self_cell.disable_bar = true
+                    if self_cell.bar then
+                        self_cell.bar:Show(false)
+                    end
+                    orig_add_progress_bar(self_cell, xml, obj, sec, clsid)
+                    if self_cell.bar then
+                        self_cell.bar:Show(false)
+                    end
+                    if self_cell.cond_text then
+                        self_cell.cond_text:Show(false)
+                    end
+                    if self_cell.cond_text_bg then
+                        self_cell.cond_text_bg:Show(false)
+                    end
+                    self_cell.disable_bar_og = prev_og
+                    self_cell.disable_bar = prev_dis
+                    return
+                else
+                    -- Ensure disable_bar_og is false and Utjan cond_text is enabled so non-firearm condition % renders
+                    self_cell.disable_bar_og = false
+                    self_cell.disable_bar = false
+                    local u_ct = z_item_icon_info and z_item_icon_info.settings and z_item_icon_info.settings.cond_text or nil
+                    local prev_ct_en = nil
+                    if type(u_ct) == "table" then
+                        prev_ct_en = u_ct.enable
+                        u_ct.enable = true
+                    end
+                    orig_add_progress_bar(self_cell, xml, obj, sec, clsid)
+                    if type(u_ct) == "table" and prev_ct_en ~= nil then
+                        u_ct.enable = prev_ct_en
+                    end
+                    self_cell.disable_bar_og = prev_og
+                    self_cell.disable_bar = prev_dis
+                    return
+                end
+            end
+            return orig_add_progress_bar(self_cell, xml, obj, sec, clsid)
+        end
+    end
+end
+
+-- @z_func: HCL_MCM.on_game_start [export:callback:on_game_start] | bind:hcl_cond_gamma_gun_hide
+function on_game_start()
+    hides_gun_cond = (_G.grok_gun_no_condition_text ~= nil)
+    runtime_cache.hides_gun_cond = hides_gun_cond
+    runtime_cache.config_cache = {}
+    install_icon_hooks()
     RegisterScriptCallback("on_option_change", on_option_change)
+    z_probe(2, "hcl_mcm.on_game_start", "Initialized HCL_MCM | hides_gun_cond=%s", hides_gun_cond)
 end

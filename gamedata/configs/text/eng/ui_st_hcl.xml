@@ -3,13 +3,7 @@
     <string id="ui_mcm_menu_hcl">
         <text>Hover Corpse Loot</text>
     </string>
-    <string id="ui_mcm_hcl">
-        <text>Hover Corpse Loot</text>
-    </string>
     <string id="ui_mcm_hcl_title">
-        <text>Hover Corpse Loot</text>
-    </string>
-    <string id="ui_mcm_title_hcl">
         <text>Hover Corpse Loot</text>
     </string>
     <string id="ui_mcm_menu_ui_options">
@@ -18,78 +12,13 @@
     <string id="ui_mcm_hcl_ui_options">
         <text>UI Options</text>
     </string>
-    <string id="ui_mcm_hcl_ui_options_title">
-        <text>Hover Corpse Loot - UI Options</text>
-    </string>
     <string id="ui_mcm_menu_ui_controls">
         <text>UI Controls</text>
     </string>
     <string id="ui_mcm_hcl_ui_controls">
         <text>UI Controls</text>
     </string>
-    <string id="ui_mcm_hcl_ui_controls_title">
-        <text>Hover Corpse Loot - UI Controls</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_options_hcl_toggle">
-        <text>Toggle Hover Corpse Loot</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_options_hcl_cond">
-        <text>Toggle Condition % on Item Icons</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_options_hcl_parts_cond">
-        <text>Toggle Parts condition dots on Weapons &amp; Armors</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_options_hcl_parts_repair_type">
-        <text>Toggle Repair type Icons on Weapons &amp; Armors</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_options_hcl_patches_on_armor">
-        <text>Toggle Faction patch Icons on Armors</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_options_hcl_x_offset">
-        <text>Hover UI Horizontal Offset from crosshair (OFFSET : X)</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_options_hcl_y_offset">
-        <text>Hover UI Vertical Offset from crosshair (OFFSET : Y)</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_options_hcl_ui_main_x">
-        <text>Hover UI Horizontal Size (X Axis)</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_options_hcl_ui_opacity">
-        <text>Opacity of the Hover UI Window</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_options_hcl_ui_delay">
-        <text>Activation Delay for Hover Corpse Loot UI</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_options_hcl_max_dist">
-        <text>Maximum distance from corpse to activate Hover UI</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_controls_hcl_bg_scolor">
-        <text>Item icon selection background color</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_controls_hcl_bg_scolor_brightness">
-        <text>Item icon selection color brightness</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_controls_hcl_s_acceleration">
-        <text>Cursor Acceleration</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_controls_hcl_s_acceleration_desc">
-        <text>Clamps the Cursor step speed to mouse scroll wheel speed.\n[DEFAULT = 1.0] 1:1 Cursor to scroll wheel step speed\nEvery value increment increases cursor acceleration by 10%</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_controls_hcl_univ_modifier">
-        <text>Universal Modifier Key</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_controls_hcl_univ_modifier_desc">
-        <text>Rebind the Universal modifier key\n[MODIFIER + MOUSE LMB] = Field Strip weapon parts and attachments.\n[MODIFIER + MOUSE RMB] = Disassemble Item\n[MODIFIER + SCROLL WHEEL(UP/DOWN)] = Move the cursor along column (Y-Axis Movement)\n[MODIFIER + KEYBOARD NUMBER KEY (1-5)] = Number keys (1-5) maps to (6,0)</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_controls_hcl_jump_type">
-        <text>Keyboard number key shortcut behavior</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_controls_hcl_jump_type_desc">
-        <text>Exact Row : Cursor jumps to the exact row shown in the Hover UI\nItem Kind : Cursor in Hover UI Jumps to the item row matching their kind (Weapons = 2, Ammo = 4)</text>
-    </string>
-    <string id="ui_mcm_hcl_ui_controls_hcl_wpn_prt_min_cond">
-        <text>Minimum weapon parts condition to Strip</text>
-    </string>
+
     <string id="ui_mcm_lst_hcl_amber">
         <text>Amber</text>
     </string>
@@ -108,6 +37,111 @@
     <string id="ui_mcm_lst_hcl_item_kind">
         <text>Item Kind</text>
     </string>
+
+    <string id="ui_mcm_hcl_ui_options_hcl_toggle">
+        <text>Toggle Hover Corpse Loot</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_toggle_desc">
+        <text>Master toggle enabling or disabling the Hover Corpse Loot HUD window.</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_cond">
+        <text>Toggle Condition % on Item Icons</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_cond_desc">
+        <text>Show item condition percentage and progress bars on eligible icons in the Hover UI.</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_parts_cond">
+        <text>Toggle Parts condition dots on Weapons &amp; Armors</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_parts_cond_desc">
+        <text>Show internal component condition indicator dots on weapons and outfits in the Hover UI.</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_parts_repair_type">
+        <text>Toggle Repair type Icons on Weapons &amp; Armors</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_parts_repair_type_desc">
+        <text>Show compatible repair kit type badges on weapons and outfits in the Hover UI.</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_patches_on_armor">
+        <text>Toggle Faction patch Icons on Armors</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_patches_on_armor_desc">
+        <text>Show faction patch badges on stalker outfits in the Hover UI.</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_x_offset">
+        <text>Hover UI Horizontal Offset from crosshair (OFFSET : X)</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_x_offset_desc">
+        <text>Horizontal screen offset in pixels from the center crosshair to the Hover UI window.</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_y_offset">
+        <text>Hover UI Vertical Offset from crosshair (OFFSET : Y)</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_y_offset_desc">
+        <text>Vertical screen offset in pixels from the center crosshair to the Hover UI window.</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_ui_main_x">
+        <text>Hover UI Horizontal Size (X Axis)</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_ui_main_x_desc">
+        <text>Total horizontal width in pixels of the Hover UI window.</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_ui_opacity">
+        <text>Opacity of the Hover UI Window</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_ui_opacity_desc">
+        <text>Background opacity percentage of the Hover UI window.</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_ui_delay">
+        <text>Activation Delay for Hover Corpse Loot UI</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_ui_delay_desc">
+        <text>Delay in milliseconds while aiming at a corpse before opening the Hover UI window.</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_max_dist">
+        <text>Maximum distance from corpse to activate Hover UI</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_options_hcl_max_dist_desc">
+        <text>Maximum distance in meters from the targeted corpse at which the Hover UI activates.</text>
+    </string>
+
+    <string id="ui_mcm_hcl_ui_controls_hcl_bg_scolor">
+        <text>Item icon selection background color</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_controls_hcl_bg_scolor_desc">
+        <text>Color tint applied to the currently selected item cell highlight in the Hover UI.</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_controls_hcl_bg_scolor_brightness">
+        <text>Item icon selection color brightness</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_controls_hcl_bg_scolor_brightness_desc">
+        <text>Brightness intensity percentage of the selected item highlight color.</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_controls_hcl_s_acceleration">
+        <text>Cursor Acceleration</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_controls_hcl_s_acceleration_desc">
+        <text>Clamps the Cursor step speed to mouse scroll wheel speed.\n[DEFAULT = 1.0] 1:1 Cursor to scroll wheel step speed.\nEvery value increment increases cursor acceleration by 10%.</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_controls_hcl_univ_modifier">
+        <text>Universal Modifier Key</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_controls_hcl_univ_modifier_desc">
+        <text>Rebind the Universal modifier key.\n[MODIFIER + MOUSE LMB] = Field Strip weapon parts and attachments.\n[MODIFIER + MOUSE RMB] = Disassemble Item.\n[MODIFIER + SCROLL WHEEL(UP/DOWN)] = Move the cursor along column (Y-Axis Movement).\n[MODIFIER + KEYBOARD NUMBER KEY (1-5)] = Number keys (1-5) maps to (6-0).</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_controls_hcl_jump_type">
+        <text>Keyboard number key shortcut behavior</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_controls_hcl_jump_type_desc">
+        <text>Exact Row : Cursor jumps to the exact row shown in the Hover UI.\nItem Kind : Cursor in Hover UI jumps to the item row matching their kind (Weapons = 2, Ammo = 4).</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_controls_hcl_wpn_prt_min_cond">
+        <text>Minimum weapon parts condition to Strip</text>
+    </string>
+    <string id="ui_mcm_hcl_ui_controls_hcl_wpn_prt_min_cond_desc">
+        <text>Minimum condition percentage threshold for internal weapon parts during Field Strip.</text>
+    </string>
+
     <string id="st_hcl_looted_tag">
         <text>[LOOTED]</text>
     </string>

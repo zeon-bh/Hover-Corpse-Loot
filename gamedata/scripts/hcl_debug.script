@@ -1,69 +1,32 @@
 -- [SYSTEM] HclDebug
 
 Z_DEBUG_LEVEL = 0
+MODULE_OVERRIDES = {}
 
-module_overrides = {
-    hcl_mcm = nil,
-    hcl_main = nil,
-    hcl_loot = nil,
-    hcl_ui = nil,
-}
-
-local LEVEL_TAGS = {
-    [1] = "ERROR",
-    [2] = "STATE",
-    [3] = "VERBOSE",
-}
-
--- @z_func: HclDebug.resolve_level [internal:debug_hub]
-local function resolve_level(func_name)
-    if func_name then
-        local dot_pos = string.find(func_name, ".", 1, true)
-        local mod_key = dot_pos and string.sub(func_name, 1, dot_pos - 1) or func_name
-        local override = module_overrides[mod_key]
-        if override ~= nil then
-            return override
-        end
+-- @z_func: HclDebug.get_level [export:output:debug_hub]
+function get_level(mod_name)
+    if mod_name and MODULE_OVERRIDES[mod_name] ~= nil then
+        return MODULE_OVERRIDES[mod_name]
     end
-    return Z_DEBUG_LEVEL or 0
-end
-
--- @z_func: HclDebug.sanitize_varargs [internal:debug_hub]
-local function sanitize_varargs(count, ...)
-    local args = {}
-    for i = 1, count do
-        local v = select(i, ...)
-        local tv = type(v)
-        if tv ~= "number" and tv ~= "string" then
-            args[i] = tostring(v)
-        else
-            args[i] = v
-        end
-    end
-    return args
+    return Z_DEBUG_LEVEL
 end
 
 -- @z_func: HclDebug.z_probe [export:output:debug_hub]
 function z_probe(level, func_name, fmt, ...)
-    local active_level = resolve_level(func_name)
-    if not level or level <= 0 or active_level < level then
+    local fn_str = tostring(func_name or "hcl")
+    local mod_prefix = string.match(fn_str, "^([^%.]+)")
+    local active_lvl = get_level(mod_prefix)
+    if active_lvl <= 0 or (tonumber(level) or 3) > active_lvl then
         return
     end
-    local tag = LEVEL_TAGS[level] or "LOG"
-    local count = select("#", ...)
-    local msg = ""
-    if fmt ~= nil then
-        if count > 0 then
-            local args = sanitize_varargs(count, ...)
-            msg = string.format(tostring(fmt), unpack(args, 1, count))
-        else
-            msg = tostring(fmt)
-        end
+    local msg
+    if select("#", ...) > 0 then
+        local ok, formatted = pcall(string.format, tostring(fmt or ""), ...)
+        msg = ok and formatted or tostring(fmt or "")
+    else
+        msg = tostring(fmt or "")
     end
-    printf("[Hover Corpse Loot] | %s | [%s] %s", tostring(func_name or "hcl"), tag, msg)
-end
-
--- @z_func: HclDebug.set_debug_level [export:output:debug_hub]
-function set_debug_level(level)
-    Z_DEBUG_LEVEL = tonumber(level) or 0
+    if printf then
+        printf("[Hover Corpse Loot] | %s | %s", fn_str, msg)
+    end
 end

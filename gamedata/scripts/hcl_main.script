@@ -1,15 +1,19 @@
 -- [SYSTEM] HCL_Main
 
-corpse_check_status = "INVALID"
-callback_status = "IDLE"
-hovered_corpse = nil
-
--- @z [HCL_Main] data:HCL_Main.data
-local main_state = {
+-- @z [HCL_Main] data:HCL_Main.data | bind:hcl_main_two_phase_prepare_and_unlock
+local main_data = {
     corpse_check_status = "INVALID",
     callback_status = "IDLE",
     hovered_corpse = nil,
 }
+
+local next_poll_tg = 0
+local cached_ray = nil
+local last_corpse_id = nil
+local prepare_deadline_tg = nil
+local wheel_unlocked_id = nil
+local deferred_scav_ids = {}
+local active_phase1_npc_id = nil
 
 -- @z_func: HCL_Main.z_probe [internal:shared]
 local function z_probe(level, func_name, fmt, ...)
@@ -18,50 +22,39 @@ local function z_probe(level, func_name, fmt, ...)
     end
 end
 
--- @z_func: HCL_Main.sync_exports [internal:shared]
-local function sync_exports()
-    corpse_check_status = main_state.corpse_check_status
-    callback_status = main_state.callback_status
-    hovered_corpse = main_state.hovered_corpse
-end
-
--- @z_func: HCL_Main.get_corpse_check_status [export:output:get_corpse_check_status]
+-- @z_func: HCL_Main.get_corpse_check_status [export:output:corpse_check_status] | bind:hcl_main_two_phase_prepare_and_unlock
 function get_corpse_check_status()
-    return main_state.corpse_check_status
+    return main_data.corpse_check_status
 end
 
--- @z_func: HCL_Main.get_callback_status [export:output:get_callback_status]
+-- @z_func: HCL_Main.get_callback_status [export:output:callback_status] | bind:hcl_main_two_phase_prepare_and_unlock
 function get_callback_status()
-    return main_state.callback_status
+    return main_data.callback_status
 end
 
--- @z_func: HCL_Main.get_hovered_corpse [export:output:get_hovered_corpse]
+-- @z_func: HCL_Main.get_hovered_corpse [export:output:hovered_corpse] | bind:hcl_main_two_phase_prepare_and_unlock
 function get_hovered_corpse()
-    return main_state.hovered_corpse
+    return main_data.hovered_corpse
 end
 
--- @z_func: HCL_Main.get_state [export:output:get_state]
-function get_state()
-    return {
-        corpse_check_status = main_state.corpse_check_status,
-        callback_status = main_state.callback_status,
-        hovered_corpse = main_state.hovered_corpse,
-    }
-end
-
--- @z_func: HCL_Main.is_corpse_looted [export:output:is_corpse_looted] | bind:hcl_two_phase_corpse_callbacks
-function is_corpse_looted(corpse)
-    if not corpse then
+-- @z_func: HCL_Main.flush_deferred_scavenger [export:output:HCL_Main.output] | bind:hcl_main_two_phase_prepare_and_unlock
+function flush_deferred_scavenger(npc)
+    if not npc then
         return false
     end
-    local id = corpse:id()
-    local name = corpse:name()
-    if se_load_var(id, name, "hcl_looted") then
+    local id = npc:id()
+    local name = npc:name()
+    local was_deferred = deferred_scav_ids[id] or (se_load_var and se_load_var(id, name, "hcl_scav_deferred") == true)
+    deferred_scav_ids[id] = nil
+    if se_save_var then
+        se_save_var(id, name, "hcl_scav_deferred", false)
+    end
+    if _G.liz_fdda_redone_body_search and type(_G.liz_fdda_redone_body_search.haruka_scavanger_effect) == "function" then
+        _G.liz_fdda_redone_body_search.haruka_scavanger_effect()
         return true
     end
-    local death_dropped = se_load_var(id, name, "death_dropped")
-    local phase1_only = se_load_var(id, name, "hcl_phase1_only")
-    if death_dropped and not phase1_only then
+    if was_deferred and _G.haru_skills and type(_G.haru_skills.scavanger_effect) == "function" then
+        _G.haru_skills.scavanger_effect(npc)
         return true
     end
     return false
@@ -69,339 +62,252 @@ end
 
 -- [SYSTEM] HCL_CorpseCheck
 
--- @z [HCL_CorpseCheck] data:RayCast Parameters
+-- @z [HCL_CorpseCheck] data:RayCast Parameters | bind:hcl_main_corpse_raycast
 local raycast_params = {
     polling_rate = 50,
-    next_poll_tg = 0,
-    cached_ray = nil,
 }
 
--- @z_func: HCL_CorpseCheck.is_dead_human_stalker [internal:shared] | bind:hcl_corpse_raycast
-local function is_dead_human_stalker(obj)
-    if obj and IsStalker(obj) and not obj:alive() then
-        return true
-    end
-    return false
+-- @z_func: HCL_CorpseCheck.is_master_enabled [export:rule:HCL Master Toggle] | bind:hcl_main_corpse_raycast
+function is_master_enabled()
+    return hcl_mcm ~= nil and hcl_mcm.get_config("hcl_mcm_toggle") == true
 end
 
--- @z_func: HCL_CorpseCheck.is_corpse_claimed [internal:Claimed] | bind:hcl_loot_claim_eval
-local function is_corpse_claimed(corpse)
-    if not corpse or not alife_storage_manager or not alife_storage_manager.get_state then
-        return false
-    end
-    local m_data = alife_storage_manager.get_state()
-    if not m_data then
-        return false
-    end
-    local id = corpse:id()
-    if m_data.Complete_looted and m_data.Complete_looted[id] then
+-- @z_func: HCL_CorpseCheck.is_player_ui_or_hands_blocked [internal:Invalid] | bind:hcl_main_corpse_raycast | states:Invalid
+local function is_player_ui_or_hands_blocked()
+    if not db.actor or not db.actor:alive() then
         return true
     end
-    if m_data.claimed_loot and m_data.claimed_loot[id] then
-        local claimer_id = m_data.claimed_loot[id]
-        if type(claimer_id) == "number" then
-            local sender = level.object_by_id(claimer_id)
-            if sender and sender:alive() and IsStalker(sender) then
-                return true
-            end
+    if not main_hud_shown() or actor_menu.get_last_mode() ~= 0 then
+        return true
+    end
+    -- Query C++ ActorMenu.get_pda_menu() and active PDA slots (8/14) read-only so NPC PDA singleton reset never hides the top tab bar.
+    local pda_menu = ActorMenu and ActorMenu.get_pda_menu and ActorMenu.get_pda_menu() or nil
+    if pda_menu and pda_menu:IsShown() then
+        return true
+    end
+    local act_slot = db.actor.active_slot and db.actor:active_slot() or 0
+    if act_slot == 8 or act_slot == 14 then
+        return true
+    end
+    if _G.lam2 and _G.lam2.is_running and _G.lam2.is_running() then
+        local body_act = _G.lam2.get_action_with_tag and _G.lam2.get_action_with_tag("body_search")
+        if not body_act then
+            return true
         end
     end
     return false
 end
 
--- @z_func: HCL_CorpseCheck.probe_corpse_raycast [export:rule:Active Polling Guard] | bind:hcl_corpse_raycast | states:Invalid,Valid
-function probe_corpse_raycast(max_dist)
-    local target = nil
-    if demonized_geometry_ray and demonized_geometry_ray.geometry_ray then
-        local ray = raycast_params.cached_ray
-        if not ray then
-            ray = demonized_geometry_ray.geometry_ray({
+-- @z_func: HCL_CorpseCheck.cast_corpse_ray [export:rule:Active Polling Guard] | bind:hcl_main_corpse_raycast
+function cast_corpse_ray()
+    local max_dist = (hcl_mcm and tonumber(hcl_mcm.get_config("hcl_mcm_max_dist"))) or 2.0
+    local hit_obj = nil
+    if _G.demonized_geometry_ray and _G.demonized_geometry_ray.geometry_ray then
+        if not cached_ray then
+            cached_ray = _G.demonized_geometry_ray.geometry_ray({
                 ray_range = max_dist,
                 contact_range = max_dist,
                 flags = 3,
                 ignore_object = db.actor,
             })
-            raycast_params.cached_ray = ray
         end
-        -- C++ ray_pick:query() mutates internal range in-place on hit; reset before every query
-        ray.ray_range = max_dist
-        ray.contact_range = max_dist
-        if ray.ray then
-            ray.ray:set_range(max_dist)
-            ray.ray:set_ignore_object(db.actor)
+        -- X-Ray C++ ray_pick:query() mutates internal range in-place to the last hit distance; reset before every query.
+        cached_ray.ray_range = max_dist
+        cached_ray.contact_range = max_dist
+        if cached_ray.ray then
+            cached_ray.ray:set_range(max_dist)
+            cached_ray.ray:set_ignore_object(db.actor)
         end
-        local cam = device()
-        local res = ray:get(cam.cam_pos, cam.cam_dir)
-        local hit_obj = res and (res.object or (res.result and res.result.object))
-        if is_dead_human_stalker(hit_obj) then
-            target = hit_obj
-        elseif hit_obj then
-            -- Retry once ignoring dynamic clutter (e.g. dropped weapon lying on corpse)
-            ray.ray_range = max_dist
-            ray.contact_range = max_dist
-            if ray.ray then
-                ray.ray:set_range(max_dist)
-                ray.ray:set_ignore_object(hit_obj)
+        local dev = device()
+        local res = cached_ray:get(dev.cam_pos, dev.cam_dir)
+        hit_obj = res and res.object or nil
+        -- Retry once ignoring non-stalker dynamic obstacles (such as a dropped weapon resting on the corpse chest).
+        if hit_obj and not IsStalker(hit_obj) then
+            cached_ray.ray_range = max_dist
+            cached_ray.contact_range = max_dist
+            if cached_ray.ray then
+                cached_ray.ray:set_ignore_object(hit_obj)
+                cached_ray.ray:set_range(max_dist)
             end
-            local retry_res = ray:get(cam.cam_pos, cam.cam_dir)
-            local retry_obj = retry_res and (retry_res.object or (retry_res.result and retry_res.result.object))
-            if is_dead_human_stalker(retry_obj) then
-                target = retry_obj
+            local retry_res = cached_ray:get(dev.cam_pos, dev.cam_dir)
+            hit_obj = retry_res and retry_res.object or nil
+            if cached_ray.ray then
+                cached_ray.ray:set_ignore_object(db.actor)
             end
         end
     end
-    if not target then
-        local fallback_obj = level.get_target_obj()
-        if fallback_obj and level.get_target_dist() <= max_dist and is_dead_human_stalker(fallback_obj) then
-            target = fallback_obj
+    if not (hit_obj and IsStalker(hit_obj) and not hit_obj:alive()) then
+        local tgt = level.get_target_obj and level.get_target_obj() or nil
+        local tgt_dist = level.get_target_dist and level.get_target_dist() or 999
+        if tgt and tgt_dist <= max_dist and IsStalker(tgt) and not tgt:alive() then
+            hit_obj = tgt
         end
     end
-    return target
+    if hit_obj and IsStalker(hit_obj) and not hit_obj:alive() then
+        return hit_obj
+    end
+    return nil
 end
 
--- @z_func: HCL_CorpseCheck.enter_corpse_invalid [export:state:Invalid] | bind:hcl_corpse_raycast
-function enter_corpse_invalid()
-    main_state.corpse_check_status = "INVALID"
-    main_state.hovered_corpse = nil
-    sync_exports()
+-- @z_func: HCL_CorpseCheck.enter_state_invalid [export:state:Invalid] | bind:hcl_main_corpse_raycast | states:Invalid
+function enter_state_invalid()
+    main_data.corpse_check_status = "INVALID"
+    main_data.hovered_corpse = nil
 end
 
--- @z_func: HCL_CorpseCheck.enter_corpse_claimed [export:state:Claimed] | bind:hcl_loot_claim_eval
-function enter_corpse_claimed(corpse)
-    main_state.hovered_corpse = corpse
-    main_state.corpse_check_status = "CLAIMED"
-    sync_exports()
-end
-
--- @z_func: HCL_CorpseCheck.enter_corpse_valid [export:state:Valid] | bind:hcl_corpse_raycast
-function enter_corpse_valid(corpse)
-    main_state.hovered_corpse = corpse
-    main_state.corpse_check_status = "VALID"
-    sync_exports()
+-- @z_func: HCL_CorpseCheck.enter_state_valid [export:state:Valid] | bind:hcl_main_corpse_raycast | states:Valid
+function enter_state_valid(corpse)
+    main_data.hovered_corpse = corpse
+    main_data.corpse_check_status = "VALID"
 end
 
 -- [SYSTEM] HCL_CallbackTrigger
 
--- @z [HCL_CallbackTrigger] data:Callback Latches
-local callback_latches = {
-    interaction_unlocked = false,
-    timer_completed = false,
-    active_corpse_id = nil,
-    timer_running = false,
-    loot_executed = false,
-    suppress_vanilla_loot = false,
-    inv_hook_installed = false,
-}
-
--- @z_func: HCL_CallbackTrigger.run_deferred_scavenger [internal:LOOT] | bind:hcl_two_phase_corpse_callbacks
-local function run_deferred_scavenger()
-    if liz_fdda_redone_body_search and liz_fdda_redone_body_search.haruka_scavanger_effect then
-        liz_fdda_redone_body_search.haruka_scavanger_effect()
-    end
-    return true
-end
-
--- @z_func: HCL_CallbackTrigger.install_vanilla_inventory_guard [export:rule:Vanilla Inventory Suppression] | bind:hcl_two_phase_corpse_callbacks
-function install_vanilla_inventory_guard()
-    if callback_latches.inv_hook_installed then
-        return
-    end
-    if ui_inventory and ui_inventory.UIInventory and ui_inventory.UIInventory.npc_on_use then
-        local orig_npc_on_use = ui_inventory.UIInventory.npc_on_use
-        ui_inventory.UIInventory.npc_on_use = function(self_inv, obj, who)
-            if callback_latches.suppress_vanilla_loot then
-                return
-            end
-            return orig_npc_on_use(self_inv, obj, who)
-        end
-        callback_latches.inv_hook_installed = true
+-- @z_func: HCL_CallbackTrigger.stub_scavenger_effect [internal:Vanilla Inventory Suppression] | bind:hcl_main_two_phase_prepare_and_unlock
+local function stub_scavenger_effect()
+    if active_phase1_npc_id then
+        deferred_scav_ids[active_phase1_npc_id] = true
     end
 end
 
--- @z_func: HCL_CallbackTrigger.reset_callback_trigger_idle [internal:IDLE]
-local function reset_callback_trigger_idle()
-    if callback_latches.timer_running then
-        RemoveTimeEvent("hcl_ui_delay", "delay")
-        callback_latches.timer_running = false
-    end
-    callback_latches.interaction_unlocked = false
-    callback_latches.timer_completed = false
-    callback_latches.active_corpse_id = nil
-    callback_latches.loot_executed = false
-    main_state.callback_status = "IDLE"
-    sync_exports()
-end
-
--- @z_func: HCL_CallbackTrigger.enter_callback_idle [export:state:IDLE]
-function enter_callback_idle()
-    reset_callback_trigger_idle()
-end
-
--- @z_func: HCL_CallbackTrigger.enter_callback_loot [export:state:LOOT] | bind:hcl_two_phase_corpse_callbacks
-function enter_callback_loot(corpse)
-    if not corpse then
-        return
-    end
-    main_state.callback_status = "LOOT"
-    sync_exports()
-    if callback_latches.loot_executed then
-        return
-    end
-    callback_latches.loot_executed = true
-
-    local id = corpse:id()
-    local name = corpse:name()
-    local already_looted = is_corpse_looted(corpse)
-    if not already_looted then
-        se_save_var(id, name, "hcl_looted", true)
-        se_save_var(id, name, "hcl_phase1_only", false)
-        z_probe(2, "hcl_main.enter_callback_loot", "Phase 2 LOOT unlocked for corpse id=%d (%s)", id, name)
-
-        if item_money and item_money.actor_on_loot_money then
-            item_money.actor_on_loot_money(corpse)
-        end
-
-        local comm = (character_community and character_community(corpse)) or (corpse.character_community and corpse:character_community())
-        if comm then
-            SendScriptCallback("actor_on_interaction", "factions", nil, comm)
-        end
-
-        install_vanilla_inventory_guard()
-        callback_latches.suppress_vanilla_loot = true
-        SendScriptCallback("npc_on_use", corpse, db.actor)
-        callback_latches.suppress_vanilla_loot = false
-
-        CreateTimeEvent("hcl_phase2", "haruka_scav_" .. tostring(id), 0.05, run_deferred_scavenger)
-    else
-        z_probe(2, "hcl_main.enter_callback_loot", "Corpse id=%d already looted; skipped Phase 2 callbacks", id)
-    end
-end
-
--- @z_func: HCL_CallbackTrigger.enter_callback_preview [export:state:PREVIEW]
-function enter_callback_preview()
-    if main_state.callback_status ~= "PREVIEW" then
-        main_state.callback_status = "PREVIEW"
-        sync_exports()
-        z_probe(2, "hcl_main.enter_callback_preview", "Entered PREVIEW for corpse id=%s", callback_latches.active_corpse_id)
-    end
-end
-
--- @z_func: HCL_CallbackTrigger.on_ui_delay_complete [internal:PREPARE]
-local function on_ui_delay_complete()
-    callback_latches.timer_running = false
-    callback_latches.timer_completed = true
-    if main_state.corpse_check_status == "VALID" and main_state.hovered_corpse then
-        if callback_latches.interaction_unlocked then
-            enter_callback_loot(main_state.hovered_corpse)
-        else
-            enter_callback_preview()
-        end
-    end
-    return true
-end
-
--- @z_func: HCL_CallbackTrigger.enter_callback_prepare [export:state:PREPARE] | bind:hcl_two_phase_corpse_callbacks
-function enter_callback_prepare(corpse)
+-- @z_func: HCL_CallbackTrigger.run_phase1_item_generation [export:rule:Vanilla Inventory Suppression] | bind:hcl_main_two_phase_prepare_and_unlock
+function run_phase1_item_generation(corpse)
     if not corpse then
         return
     end
     local id = corpse:id()
-    if callback_latches.active_corpse_id == id and callback_latches.timer_running then
+    local name = corpse:name()
+    if se_load_var and se_load_var(id, name, "death_dropped") then
         return
     end
-    callback_latches.active_corpse_id = id
-    callback_latches.timer_completed = false
-    callback_latches.timer_running = true
-    callback_latches.loot_executed = false
-    main_state.callback_status = "PENDING"
-    sync_exports()
-
-    local name = corpse:name()
-    local death_dropped = se_load_var(id, name, "death_dropped")
-    if not death_dropped then
+    if se_save_var then
         se_save_var(id, name, "hcl_phase1_only", true)
-        if death_manager and death_manager.create_release_item then
-            death_manager.create_release_item(corpse)
-        end
-        if guaranteed_loot and guaranteed_loot.npc_on_use then
-            guaranteed_loot.npc_on_use(corpse, db.actor)
-        end
-        z_probe(2, "hcl_main.enter_callback_prepare", "Phase 1 PREPARE generated items for corpse id=%d", id)
     end
-
-    local delay_ms = tonumber(hcl_mcm.get_config("hcl_ui_delay")) or 200
-    local delay_sec = math.max(0.05, delay_ms / 1000.0)
-    CreateTimeEvent("hcl_ui_delay", "delay", delay_sec, on_ui_delay_complete)
+    active_phase1_npc_id = id
+    local orig_scav = nil
+    if _G.haru_skills and type(_G.haru_skills.scavanger_effect) == "function" then
+        orig_scav = _G.haru_skills.scavanger_effect
+        _G.haru_skills.scavanger_effect = stub_scavenger_effect
+    end
+    if _G.death_manager and type(_G.death_manager.create_release_item) == "function" then
+        _G.death_manager.create_release_item(corpse)
+    end
+    if orig_scav then
+        _G.haru_skills.scavanger_effect = orig_scav
+    end
+    if deferred_scav_ids[id] and se_save_var then
+        se_save_var(id, name, "hcl_scav_deferred", true)
+    end
+    active_phase1_npc_id = nil
+    if _G.guaranteed_loot and type(_G.guaranteed_loot.npc_on_use) == "function" then
+        _G.guaranteed_loot.npc_on_use(corpse, db.actor)
+    end
+    z_probe(2, "hcl_main.run_phase1_item_generation", "Generated Phase-1 items for corpse id=%s name=%s", tostring(id), tostring(name))
 end
 
--- @z_func: HCL_CallbackTrigger.evaluate_callback_state [internal:shared] | states:IDLE,LOOT,PREVIEW,PREPARE
-local function evaluate_callback_state()
-    local target = main_state.hovered_corpse
-    local target_id = target and target:id() or nil
-    if main_state.corpse_check_status ~= "VALID" or not target_id then
-        if main_state.callback_status ~= "IDLE" or callback_latches.active_corpse_id ~= nil then
-            enter_callback_idle()
-        end
+-- @z_func: HCL_CallbackTrigger.check_target_corpse_swap [export:rule:Target Corpse Swap Reset] | bind:hcl_main_two_phase_prepare_and_unlock
+function check_target_corpse_swap(corpse_id)
+    if corpse_id ~= nil and last_corpse_id ~= nil and corpse_id ~= last_corpse_id then
+        prepare_deadline_tg = nil
+        wheel_unlocked_id = nil
+        z_probe(2, "hcl_main.check_target_corpse_swap", "Swapped corpse %s -> %s; reset timer and unlock", tostring(last_corpse_id), tostring(corpse_id))
+    end
+    last_corpse_id = corpse_id
+end
+
+-- @z_func: HCL_CallbackTrigger.enter_trigger_idle [export:state:IDLE] | bind:hcl_main_two_phase_prepare_and_unlock | states:IDLE
+function enter_trigger_idle()
+    if main_data.callback_status ~= "IDLE" then
+        z_probe(2, "hcl_main.enter_trigger_idle", "State %s -> IDLE", tostring(main_data.callback_status))
+    end
+    prepare_deadline_tg = nil
+    wheel_unlocked_id = nil
+    last_corpse_id = nil
+    main_data.callback_status = "IDLE"
+end
+
+-- @z_func: HCL_CallbackTrigger.enter_trigger_loot [export:state:LOOT] | bind:hcl_main_two_phase_prepare_and_unlock | states:LOOT
+function enter_trigger_loot()
+    if main_data.callback_status ~= "LOOT" then
+        z_probe(2, "hcl_main.enter_trigger_loot", "State %s -> LOOT (id=%s)", tostring(main_data.callback_status), tostring(last_corpse_id))
+    end
+    main_data.callback_status = "LOOT"
+end
+
+-- @z_func: HCL_CallbackTrigger.enter_trigger_preview [export:state:PREVIEW] | bind:hcl_main_two_phase_prepare_and_unlock | states:PREVIEW
+function enter_trigger_preview()
+    if main_data.callback_status ~= "PREVIEW" then
+        z_probe(2, "hcl_main.enter_trigger_preview", "State %s -> PREVIEW (id=%s)", tostring(main_data.callback_status), tostring(last_corpse_id))
+    end
+    main_data.callback_status = "PREVIEW"
+end
+
+-- @z_func: HCL_CallbackTrigger.enter_trigger_prepare [export:state:PREPARE] | bind:hcl_main_two_phase_prepare_and_unlock | states:PREPARE
+function enter_trigger_prepare(corpse, tg)
+    if prepare_deadline_tg == nil then
+        local delay_ms = (hcl_mcm and tonumber(hcl_mcm.get_config("hcl_mcm_ui_delay"))) or 200
+        prepare_deadline_tg = tg + delay_ms
+        run_phase1_item_generation(corpse)
+        z_probe(2, "hcl_main.enter_trigger_prepare", "Entered PREPARE for id=%s delay=%sms", tostring(corpse:id()), tostring(delay_ms))
+    end
+    main_data.callback_status = "PENDING"
+end
+
+-- @z_func: HCL_CallbackTrigger.evaluate_callback_trigger [internal:shared] | bind:hcl_main_two_phase_prepare_and_unlock | states:IDLE,LOOT,PREVIEW,PREPARE
+local function evaluate_callback_trigger(tg)
+    if main_data.corpse_check_status ~= "VALID" or not main_data.hovered_corpse then
+        enter_trigger_idle()
         return
     end
-    if callback_latches.active_corpse_id ~= nil and callback_latches.active_corpse_id ~= target_id then
-        enter_callback_idle()
-    end
-    if callback_latches.interaction_unlocked then
-        enter_callback_loot(target)
-    elseif callback_latches.timer_completed then
-        enter_callback_preview()
+    local corpse = main_data.hovered_corpse
+    local corpse_id = corpse:id()
+    check_target_corpse_swap(corpse_id)
+    if wheel_unlocked_id == corpse_id then
+        enter_trigger_loot()
+    elseif prepare_deadline_tg ~= nil and tg >= prepare_deadline_tg then
+        enter_trigger_preview()
     else
-        enter_callback_prepare(target)
+        enter_trigger_prepare(corpse, tg)
     end
 end
 
--- @z_func: HCL_Main.actor_on_update [export:callback:actor_on_update] | bind:hcl_corpse_raycast | states:Invalid,Claimed,Valid,IDLE,LOOT,PREVIEW,PREPARE
+-- @z_func: HCL_CallbackTrigger.on_mouse_wheel [export:callback:PREVIEW] | bind:hcl_main_two_phase_prepare_and_unlock | states:PREVIEW,LOOT
+function on_mouse_wheel(dir)
+    if main_data.corpse_check_status == "VALID" and main_data.callback_status == "PREVIEW" and main_data.hovered_corpse then
+        wheel_unlocked_id = main_data.hovered_corpse:id()
+        enter_trigger_loot()
+    end
+end
+
+-- @z_func: HCL_Main.actor_on_update [export:callback:HCL_Main.output] | bind:hcl_main_corpse_raycast
 function actor_on_update()
+    if not is_master_enabled() or is_player_ui_or_hands_blocked() then
+        enter_state_invalid()
+        enter_trigger_idle()
+        return
+    end
     local tg = time_global()
-    if tg < raycast_params.next_poll_tg then
-        return
-    end
-    raycast_params.next_poll_tg = tg + raycast_params.polling_rate
-
-    if not db.actor or not db.actor:alive() or not hcl_mcm.get_config("hcl_toggle") then
-        enter_corpse_invalid()
-        evaluate_callback_state()
-        return
-    end
-    if not main_hud_shown() or actor_menu.get_last_mode() ~= 0 then
-        enter_corpse_invalid()
-        evaluate_callback_state()
-        return
-    end
-
-    local max_dist = tonumber(hcl_mcm.get_config("hcl_max_dist")) or 2.0
-    local corpse = probe_corpse_raycast(max_dist)
-    if not corpse then
-        enter_corpse_invalid()
-    elseif is_corpse_claimed(corpse) then
-        enter_corpse_claimed(corpse)
-    else
-        enter_corpse_valid(corpse)
-    end
-    evaluate_callback_state()
-end
-
--- @z_func: HCL_CallbackTrigger.on_mouse_wheel [export:callback:on_mouse_wheel] | states:PREVIEW,LOOT
-function on_mouse_wheel(dir, flags)
-    if main_state.corpse_check_status == "VALID" and main_state.callback_status == "PREVIEW" and main_state.hovered_corpse then
-        callback_latches.interaction_unlocked = true
-        enter_callback_loot(main_state.hovered_corpse)
-        if flags then
-            flags.ret_value = false
+    if tg >= next_poll_tg then
+        next_poll_tg = tg + raycast_params.polling_rate
+        local hit_corpse = cast_corpse_ray()
+        if hit_corpse then
+            enter_state_valid(hit_corpse)
+        else
+            enter_state_invalid()
+        end
+    elseif main_data.hovered_corpse then
+        local still_online = last_corpse_id and level.object_by_id(last_corpse_id) or nil
+        if not (still_online and IsStalker(still_online) and not still_online:alive()) then
+            enter_state_invalid()
+        else
+            main_data.hovered_corpse = still_online
         end
     end
+    evaluate_callback_trigger(tg)
 end
 
--- @z_func: HCL_Main.on_game_start [export:callback:on_game_start]
+-- @z_func: HCL_Main.on_game_start [export:callback:HCL_Main.output] | bind:hcl_main_two_phase_prepare_and_unlock
 function on_game_start()
-    install_vanilla_inventory_guard()
     RegisterScriptCallback("actor_on_update", actor_on_update)
     RegisterScriptCallback("on_mouse_wheel", on_mouse_wheel)
-    z_probe(2, "hcl_main.on_game_start", "Registered HCL_Main callbacks")
 end

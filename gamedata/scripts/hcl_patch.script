@@ -1,0 +1,2230 @@
+-- [SYSTEM] HCL_Patch
+
+local patch_dirty_seq = 0
+local hooks_installed = false
+
+local FALLBACK_KIND_RANK = {
+    w_pistol = 1,
+    w_shotgun = 1,
+    w_smg = 1,
+    w_rifle = 1,
+    w_sniper = 1,
+    w_AutoShotgun = 1,
+    w_heavy = 1,
+    w_melee = 1,
+    w_explosive = 1,
+    w_misc = 1,
+    o_helmet = 2,
+    o_light = 2,
+    o_medium = 2,
+    o_heavy = 2,
+    o_sci = 2,
+    i_backpack = 2,
+    w_ammo = 3,
+    i_arty = 4,
+    i_arty_junk = 4,
+    i_arty_cont = 4,
+    i_mutant_part = 4,
+    i_mutant_belt = 4,
+    i_device = 5,
+    i_tool = 5,
+    i_repair = 5,
+    i_kit = 5,
+    i_food = 6,
+    i_drink = 6,
+    i_mutant_cooked = 6,
+    i_mutant_raw = 6,
+    i_medical = 7,
+    i_upgrade = 8,
+    i_misc = 9,
+    i_part = 9,
+    i_quest = 9,
+    i_letter = 9,
+    na = 9,
+}
+
+local spm_cache_ready = false
+local spm_kind_ranks = {}
+local spm_kind_overrides = {}
+local spm_mcm_keys = {}
+local sec_wh_cache = {}
+local spm_jump_slots = { 1, 2, 3, 4, 5, 6, 7, 8, 9 }
+local spm_cfg = {
+    npcinv = true,
+    sort_favs = true,
+    sort_junk = true,
+    hilite_favs = true,
+    icon_favs = true,
+    hilite_junk = true,
+    icon_junk = true,
+}
+
+-- @z_func: HCL_Patch.z_probe [internal:shared]
+local function z_probe(level, func_name, fmt, ...)
+    if hcl_debug and hcl_debug.z_probe then
+        hcl_debug.z_probe(level, func_name, fmt, ...)
+    end
+end
+
+-- @z_func: HCL_Patch.bump_patch_dirty [internal:shared]
+local function bump_patch_dirty()
+    patch_dirty_seq = patch_dirty_seq + 1
+end
+
+-- @z_func: HCL_Patch.get_patch_dirty_seq [export:output:HCL_Patch.output] | bind:hcl_patch_global_and_spm
+function get_patch_dirty_seq()
+    return patch_dirty_seq
+end
+
+-- @z_func: HCL_Patch.is_optional_mod_enabled [export:rule:HCL Patch Global Rule] | bind:hcl_patch_global_and_spm
+function is_optional_mod_enabled(mod_key)
+    if mod_key == "ial" then
+        return _G.z_auto_looter ~= nil and hcl_mcm ~= nil and hcl_mcm.get_config("hcl_mcm_ial") == true
+    elseif mod_key == "wpo" then
+        return _G.arti_jamming ~= nil and _G.zzzz_arti_jamming_repairs ~= nil
+    end
+    return false
+end
+
+-- [SYSTEM] HCL_SPM
+
+-- @z_func: HCL_SPM.rebuild_spm_cache [internal:Sorting Plus Mod Toggle] | bind:hcl_patch_global_and_spm
+local function rebuild_spm_cache()
+    spm_kind_ranks = {}
+    spm_kind_overrides = {}
+    spm_mcm_keys = {}
+    sec_wh_cache = {}
+    local spm = _G.zzz_rax_sortingplus_mcm
+    if spm ~= nil then
+        spm_cfg.npcinv = (spm.NPCINV ~= false)
+        spm_cfg.sort_favs = (spm.SORTFAVS ~= false)
+        spm_cfg.sort_junk = (spm.SORTJUNK ~= false)
+        spm_cfg.hilite_favs = (spm.HILITEFAVS ~= false)
+        spm_cfg.icon_favs = (spm.ICONFAVS ~= false)
+        spm_cfg.hilite_junk = (spm.HILITEJUNK ~= false)
+        spm_cfg.icon_junk = (spm.ICONJUNK ~= false)
+
+        local use_ltx = true
+        if ui_mcm and ui_mcm.get then
+            local v_npc = ui_mcm.get("SortingPlus/npcinv")
+            if v_npc ~= nil then spm_cfg.npcinv = (v_npc ~= false) end
+            local v_sf = ui_mcm.get("SortingPlus/sortfavs")
+            if v_sf ~= nil then spm_cfg.sort_favs = (v_sf ~= false) end
+            local v_sj = ui_mcm.get("SortingPlus/sortjunk")
+            if v_sj ~= nil then spm_cfg.sort_junk = (v_sj ~= false) end
+            local v_hf = ui_mcm.get("SortingPlus/hilitefavs")
+            if v_hf ~= nil then spm_cfg.hilite_favs = (v_hf ~= false) end
+            local v_if = ui_mcm.get("SortingPlus/iconfavs")
+            if v_if ~= nil then spm_cfg.icon_favs = (v_if ~= false) end
+            local v_hj = ui_mcm.get("SortingPlus/hilitejunk")
+            if v_hj ~= nil then spm_cfg.hilite_junk = (v_hj ~= false) end
+            local v_ij = ui_mcm.get("SortingPlus/iconjunk")
+            if v_ij ~= nil then spm_cfg.icon_junk = (v_ij ~= false) end
+            use_ltx = (ui_mcm.get("SortingPlus/useltx") == true)
+        end
+
+        local ok_ini, spm_ini = pcall(ini_file, "plugins\\sortingplus.ltx")
+        if not ok_ini or not spm_ini then
+            ok_ini, spm_ini = pcall(ini_file, "sortingplus.ltx")
+        end
+        if ok_ini and spm_ini then
+            if spm_ini:section_exist("item_kind_order") then
+                local n = spm_ini:line_count("item_kind_order")
+                for i = 0, n - 1 do
+                    local _, k, v = spm_ini:r_line("item_kind_order", i, "", "")
+                    if k and k ~= "" then
+                        spm_kind_ranks[k] = tonumber(v) or 99
+                    end
+                end
+            end
+            if spm_ini:section_exist("kind_overrides") then
+                local n = spm_ini:line_count("kind_overrides")
+                for i = 0, n - 1 do
+                    local _, k, v = spm_ini:r_line("kind_overrides", i, "", "")
+                    if k and k ~= "" and v and v ~= "" then
+                        spm_kind_overrides[k] = v
+                    end
+                end
+            end
+            if spm_ini:section_exist("sortingplusmcm") then
+                local n = spm_ini:line_count("sortingplusmcm")
+                for i = 0, n - 1 do
+                    local _, k, v = spm_ini:r_line("sortingplusmcm", i, "", "")
+                    if k and k ~= "" then
+                        spm_mcm_keys[k] = (v and v ~= "") and v or k
+                    end
+                end
+            end
+        end
+        -- Only read MCM category ranks for keys explicitly registered in [sortingplusmcm] when useltx is false.
+        if (not use_ltx) and ui_mcm and ui_mcm.get then
+            for kind_name, mcm_opt in pairs(spm_mcm_keys) do
+                local mcm_rank = tonumber(ui_mcm.get("SortingPlus/" .. mcm_opt))
+                if mcm_rank then
+                    spm_kind_ranks[kind_name] = mcm_rank
+                end
+            end
+        end
+    end
+    spm_cache_ready = true
+    local unique_ranks = {}
+    local seen = {}
+    if spm ~= nil and spm_cfg.npcinv ~= false then
+        if spm_cfg.sort_favs then
+            seen[-2] = true
+            unique_ranks[#unique_ranks + 1] = -2
+        end
+        for _, r in pairs(spm_kind_ranks) do
+            if not seen[r] then
+                seen[r] = true
+                unique_ranks[#unique_ranks + 1] = r
+            end
+        end
+        table.sort(unique_ranks)
+        local capped = {}
+        for i = 1, math.min(10, #unique_ranks) do
+            capped[i] = unique_ranks[i]
+        end
+        spm_jump_slots = (#capped > 0) and capped or { 1, 2, 3, 4, 5, 6, 7, 8, 9 }
+    else
+        spm_jump_slots = { 1, 2, 3, 4, 5, 6, 7, 8, 9 }
+    end
+end
+
+-- @z_func: HCL_SPM.is_spm_active [export:rule:Sorting Plus Mod Toggle] | bind:hcl_patch_global_and_spm
+function is_spm_active()
+    if _G.zzz_rax_sortingplus_mcm == nil then
+        return false
+    end
+    if not spm_cache_ready then
+        rebuild_spm_cache()
+    end
+    return spm_cfg.npcinv ~= false
+end
+
+-- @z_func: HCL_SPM.get_fallback_kind_rank [internal:Sorting Plus Mod Toggle] | bind:hcl_patch_global_and_spm
+local function get_fallback_kind_rank(sec)
+    if _G.magazine_binder and _G.magazine_binder.is_magazine and _G.magazine_binder.is_magazine(sec) then
+        return 3
+    end
+    local kind = SYS_GetParam(0, sec, "kind", "na") or "na"
+    local direct = FALLBACK_KIND_RANK[kind]
+    if direct then
+        return direct
+    end
+    if string.sub(kind, 1, 2) == "w_" then
+        return (kind == "w_ammo") and 3 or 1
+    elseif string.sub(kind, 1, 2) == "o_" then
+        return 2
+    elseif string.sub(kind, 1, 6) == "i_arty" then
+        return 4
+    end
+    return 9
+end
+
+-- @z_func: HCL_Patch.get_item_category_rank [export:output:HCL_SPM] | bind:hcl_patch_global_and_spm
+function get_item_category_rank(obj, sec)
+    sec = sec or (obj and obj:section()) or ""
+    if sec == "" then
+        return 99
+    end
+    if not spm_cache_ready then
+        rebuild_spm_cache()
+    end
+    if spm_cfg.npcinv ~= false and _G.zzz_rax_sortingplus_mcm ~= nil then
+        local spm = _G.zzz_rax_sortingplus_mcm
+        if spm_cfg.sort_favs and spm.is_favorite and spm.is_favorite(sec) then
+            return -2
+        end
+        if spm_cfg.sort_junk and spm.is_junk and spm.is_junk(sec) then
+            return 100
+        end
+        if _G.magazine_binder then
+            if obj and _G.magazine_binder.is_carried_mag and _G.magazine_binder.is_carried_mag(obj:id()) then
+                return -1
+            end
+            if _G.magazine_binder.is_magazine and _G.magazine_binder.is_magazine(sec) then
+                return spm_kind_ranks["mags"] or 0
+            end
+        end
+        local kind = spm_kind_overrides[sec] or (spm.get_sort_kind and spm.get_sort_kind(sec)) or SYS_GetParam(0, sec, "kind", "na")
+        return spm_kind_ranks[kind] or get_fallback_kind_rank(sec)
+    end
+    return get_fallback_kind_rank(sec)
+end
+
+-- @z_func: HCL_Patch.compare_items [export:output:HCL_SPM] | bind:hcl_patch_global_and_spm
+function compare_items(obj_a, obj_b)
+    local sec_a = obj_a:section()
+    local sec_b = obj_b:section()
+    local rank_a = get_item_category_rank(obj_a, sec_a)
+    local rank_b = get_item_category_rank(obj_b, sec_b)
+    if rank_a ~= rank_b then
+        return rank_a < rank_b
+    end
+    local wa, ha = get_effective_grid_wh(sec_a)
+    local wb, hb = get_effective_grid_wh(sec_b)
+    local area_a = wa * ha
+    local area_b = wb * hb
+    if area_a ~= area_b then
+        return area_a > area_b
+    end
+    if sec_a ~= sec_b then
+        return sec_a < sec_b
+    end
+    -- Quantize condition to integer permille for transitive strict-weak ordering in table.sort.
+    local cond_a = math.floor((obj_a:condition() or 1) * 1000 + 0.5)
+    local cond_b = math.floor((obj_b:condition() or 1) * 1000 + 0.5)
+    if cond_a ~= cond_b then
+        return cond_a > cond_b
+    end
+    return obj_a:id() < obj_b:id()
+end
+
+-- @z_func: HCL_Patch.get_category_jump_slots [export:output:HCL_SPM] | bind:hcl_patch_global_and_spm
+function get_category_jump_slots()
+    if not spm_cache_ready then
+        rebuild_spm_cache()
+    end
+    return spm_jump_slots
+end
+
+-- @z_func: HCL_Patch.does_item_match_jump_slot [export:output:HCL_SPM] | bind:hcl_patch_global_and_spm
+function does_item_match_jump_slot(obj, slot_idx)
+    if not obj or not slot_idx then
+        return false
+    end
+    local slots = get_category_jump_slots()
+    local target_rank = slots[slot_idx]
+    if target_rank == nil then
+        return false
+    end
+    return get_item_category_rank(obj, obj:section()) == target_rank
+end
+
+-- @z_func: HCL_SPM.get_spm_cell_meta [export:rule:SPM Hover UI Behavior] | bind:hcl_patch_global_and_spm
+function get_spm_cell_meta(sec)
+    if not sec or _G.zzz_rax_sortingplus_mcm == nil then
+        return nil
+    end
+    if not spm_cache_ready then
+        rebuild_spm_cache()
+    end
+    local spm = _G.zzz_rax_sortingplus_mcm
+    local is_fav = spm.is_favorite and spm.is_favorite(sec) == true or false
+    local is_junk = (not is_fav) and (spm.is_junk and spm.is_junk(sec) == true) or false
+    if not is_fav and not is_junk then
+        return nil
+    end
+    local show_hl = (is_fav and spm_cfg.hilite_favs) or (is_junk and spm_cfg.hilite_junk) or false
+    local show_icons = (is_fav and spm_cfg.icon_favs) or (is_junk and spm_cfg.icon_junk) or false
+    return {
+        is_favorite = is_fav,
+        is_junk = is_junk,
+        show_hl = show_hl,
+        show_icon = show_icons,
+        bg_color = show_hl and (is_fav and GetARGB(50, 176, 238, 26) or GetARGB(50, 204, 0, 0)) or nil,
+        icon_texture = show_icons and (is_fav and "ui\\sortingplus\\icon-favourite" or "ui\\sortingplus\\icon-junk") or nil,
+    }
+end
+
+-- @z_func: HCL_Patch.get_item_fav_junk_meta [export:output:HCL_SPM] | bind:hcl_patch_global_and_spm
+function get_item_fav_junk_meta(sec)
+    return get_spm_cell_meta(sec)
+end
+
+-- [SYSTEM] HCL_AMR
+
+local amr_remote_unload_active = false
+local amr_unloading_corpse_id = nil
+local mag_loaded_cnt_cache = {}
+
+-- @z_func: HCL_AMR.is_amr_active [export:rule:AMR Toggle] | bind:hcl_patch_amr_remote_unload
+function is_amr_active()
+    return _G.magazine_binder ~= nil and _G.magazines ~= nil and type(_G.magazines.func_unload_ammo) == "function"
+end
+
+-- @z_func: HCL_Patch.is_loaded_magazine [export:output:HCL_AMR] | bind:hcl_patch_amr_remote_unload
+function is_loaded_magazine(obj)
+    if not obj or not is_amr_active() then
+        return false
+    end
+    if _G.magazine_binder then
+        if not _G.magazine_binder.is_magazine(obj:section()) then
+            return false
+        end
+        local mid = obj:id()
+        local mag_data = _G.magazine_binder.get_data(mid)
+        local cnt = (mag_data and mag_data.loaded) and #mag_data.loaded or 0
+        mag_loaded_cnt_cache[mid] = cnt
+        return cnt > 0
+    end
+    return false
+end
+
+-- @z_func: HCL_Patch.get_magazine_ammo_count [export:output:HCL_AMR] | bind:hcl_patch_amr_remote_unload
+function get_magazine_ammo_count(obj)
+    if not obj then
+        return nil
+    end
+    if _G.magazine_binder then
+        if not _G.magazine_binder.is_magazine(obj:section()) then
+            return nil
+        end
+        local mid = obj:id()
+        local mag_data = _G.magazine_binder.get_data(mid)
+        local cnt = (mag_data and mag_data.loaded) and #mag_data.loaded or 0
+        mag_loaded_cnt_cache[mid] = cnt
+        return cnt
+    end
+    return nil
+end
+
+-- @z_func: HCL_Patch.unload_magazine [export:output:HCL_AMR] | bind:hcl_patch_amr_remote_unload
+function unload_magazine(obj, corpse)
+    if not is_loaded_magazine(obj) then
+        return false
+    end
+    amr_unloading_corpse_id = corpse and corpse:id() or nil
+    amr_remote_unload_active = true
+    local ok, err = pcall(_G.magazines.func_unload_ammo, obj)
+    amr_remote_unload_active = false
+    if not ok then
+        z_probe(1, "hcl_patch.unload_magazine", "AMR unload threw: %s", tostring(err))
+        return false
+    end
+    bump_patch_dirty()
+    return true
+end
+
+-- @z_func: HCL_Patch.interrupt_unload [export:output:HCL_AMR] | bind:hcl_patch_amr_remote_unload
+function interrupt_unload()
+    if amr_unloading_corpse_id ~= nil then
+        amr_unloading_corpse_id = nil
+        if is_amr_active() and type(_G.magazines.do_interrupt_magload) == "function" then
+            _G.magazines.do_interrupt_magload()
+            z_probe(2, "hcl_patch.interrupt_unload", "Interrupted active AMR timed magazine unload")
+        end
+    end
+end
+
+-- [SYSTEM] HCL_IAL
+
+local ial_target_npc_id = nil
+local ial_window_until_tg = 0
+local ial_bypass_lttr_gate = false
+local orig_lttr_is_item_hidden = nil
+
+-- @z_func: HCL_IAL.check_ial_toggle [export:rule:IAL Toggle] | bind:hcl_patch_ial_autolooter
+function check_ial_toggle()
+    return _G.z_auto_looter ~= nil and type(_G.z_auto_looter.auto_looter) == "function" and hcl_mcm ~= nil and hcl_mcm.get_config("hcl_mcm_ial") == true
+end
+
+-- @z_func: HCL_Patch.is_autolooter_active [export:output:HCL_IAL] | bind:hcl_patch_ial_autolooter
+function is_autolooter_active()
+    return check_ial_toggle()
+end
+
+-- @z_func: HCL_IAL.lttr_hidden_false_stub [internal:IAL Toggle] | bind:hcl_patch_ial_autolooter
+local function lttr_hidden_false_stub()
+    return false
+end
+
+-- @z_func: HCL_Patch.run_autolooter [export:output:HCL_IAL] | bind:hcl_patch_ial_autolooter
+function run_autolooter(npc)
+    if not npc or not check_ial_toggle() then
+        return false
+    end
+    if _G.ui_inventory and not _G.ui_inventory.GUI then
+        _G.ui_inventory.GUI = _G.ui_inventory.UIInventory()
+    end
+    local npc_id = npc:id()
+    ial_target_npc_id = npc_id
+    ial_window_until_tg = time_global() + 450
+    -- Bypass LTTR's outer blanket auto_looter block while collect_items filters strictly to revealed items.
+    local saved_lttr_fn = nil
+    local saved_still_searching = nil
+    if _G.zzzz_loot_searching then
+        saved_lttr_fn = _G.zzzz_loot_searching.is_item_hidden
+        orig_lttr_is_item_hidden = orig_lttr_is_item_hidden or saved_lttr_fn
+        _G.zzzz_loot_searching.is_item_hidden = lttr_hidden_false_stub
+        saved_still_searching = _G.zzzz_loot_searching.still_searching
+        if saved_still_searching ~= nil then
+            _G.zzzz_loot_searching.still_searching = false
+        end
+    end
+    ial_bypass_lttr_gate = true
+    local ok, err = pcall(_G.z_auto_looter.auto_looter, nil, npc)
+    ial_bypass_lttr_gate = false
+    if _G.zzzz_loot_searching then
+        if saved_lttr_fn then
+            _G.zzzz_loot_searching.is_item_hidden = saved_lttr_fn
+        end
+        if saved_still_searching ~= nil then
+            _G.zzzz_loot_searching.still_searching = saved_still_searching
+        end
+    end
+    if not ok then
+        z_probe(1, "hcl_patch.run_autolooter", "Autolooter failed on id=%s: %s", tostring(npc_id), tostring(err))
+        return false
+    end
+    bump_patch_dirty()
+    return true
+end
+
+-- [SYSTEM] HCL_LC
+
+local lc_state = "Idle"
+local lc_last_corpse_id = nil
+local lc_next_eval_tg = 0
+
+-- @z_func: HCL_LC.noop_npc_tip [internal:Claimed Corpse Restriction] | bind:hcl_patch_lc_dual_claim_ledger
+local function noop_npc_tip()
+end
+
+-- @z_func: HCL_LC.evaluate_corpse_claim_ledgers [export:rule:Claimed Corpse Restriction] | bind:hcl_patch_lc_dual_claim_ledger
+function evaluate_corpse_claim_ledgers(corpse)
+    if not corpse then
+        return false
+    end
+    local id = corpse:id()
+    if _G.grok_loot_claim ~= nil then
+        local m_state = alife_storage_manager and alife_storage_manager.get_state and alife_storage_manager.get_state() or nil
+        local tbl_looted = _G.grok_loot_claim.looted or (m_state and m_state.looted)
+        local tbl_claimed = _G.grok_loot_claim.claimed or (m_state and m_state.claimed)
+        if tbl_looted and tbl_looted[id] then
+            return true
+        end
+        if tbl_claimed and tbl_claimed[id] then
+            local sender = level.object_by_id(tbl_claimed[id])
+            if sender and IsStalker(sender) and sender:alive() then
+                return true
+            end
+        end
+    end
+    if _G.ap_ext_loot_claim ~= nil then
+        local flags = { ret_value = true }
+        local orig_tip = (_G.xpda and _G.xpda.npc_tip) or nil
+        if orig_tip then
+            _G.xpda.npc_tip = noop_npc_tip
+        end
+        local bag_type = (EDDListType and EDDListType.iDeadBodyBag) or 10
+        SendScriptCallback("ActorMenu_on_item_before_move", flags, id, nil, "loot", bag_type)
+        if orig_tip then
+            _G.xpda.npc_tip = orig_tip
+        end
+        if flags.ret_value == false then
+            return true
+        end
+    end
+    return false
+end
+
+-- @z_func: HCL_LC.enter_lc_idle [export:state:Idle] | bind:hcl_patch_lc_dual_claim_ledger | states:Idle
+function enter_lc_idle()
+    lc_state = "Idle"
+    lc_last_corpse_id = nil
+end
+
+-- @z_func: HCL_LC.enter_lc_claimed [export:state:Claimed] | bind:hcl_patch_lc_dual_claim_ledger | states:Claimed
+function enter_lc_claimed()
+    if lc_state ~= "Claimed" then
+        z_probe(2, "hcl_patch.enter_lc_claimed", "Corpse id=%s entered Claimed", tostring(lc_last_corpse_id))
+        bump_patch_dirty()
+    end
+    lc_state = "Claimed"
+end
+
+-- @z_func: HCL_LC.enter_lc_unclaimed [export:state:Unclaimed] | bind:hcl_patch_lc_dual_claim_ledger | states:Unclaimed
+function enter_lc_unclaimed()
+    if lc_state ~= "Unclaimed" then
+        bump_patch_dirty()
+    end
+    lc_state = "Unclaimed"
+end
+
+-- @z_func: HCL_Patch.is_claimed [export:output:HCL_LC] | bind:hcl_patch_lc_dual_claim_ledger
+function is_claimed()
+    return lc_state == "Claimed"
+end
+
+-- @z_func: HCL_Patch.get_lc_state [export:output:HCL_LC] | bind:hcl_patch_lc_dual_claim_ledger
+function get_lc_state()
+    return lc_state
+end
+
+-- [SYSTEM] HCL_FRA
+
+local fra_active_corpse_id = nil
+
+-- @z_func: HCL_FRA.noop_disable_input [internal:Play Loot Animation] | bind:hcl_patch_fra_body_search_lam2
+local function noop_disable_input()
+end
+
+-- @z_func: HCL_FRA.fra_start_on_enter [internal:Play Loot Animation] | bind:hcl_patch_fra_body_search_lam2
+local function fra_start_on_enter(self_act)
+    local orig_dis = level.disable_input
+    level.disable_input = noop_disable_input
+    if self_act.hcl_orig_enter then
+        self_act.hcl_orig_enter(self_act)
+    end
+    level.disable_input = orig_dis
+end
+
+-- @z_func: HCL_FRA.fra_idle_on_enter [internal:Play Loot Animation] | bind:hcl_patch_fra_body_search_lam2
+local function fra_idle_on_enter(self_act)
+    self_act.target = self_act.obj_id and level.object_by_id(self_act.obj_id) or nil
+    if not self_act.target then
+        self_act.force_close = true
+    end
+end
+
+-- @z_func: HCL_FRA.fra_idle_on_execute [internal:Play Loot Animation] | bind:hcl_patch_fra_body_search_lam2
+local function fra_idle_on_execute(self_act, elapsed)
+    local keep_open = (fra_active_corpse_id == self_act.obj_id)
+        and hcl_main ~= nil
+        and hcl_main.get_corpse_check_status() == "VALID"
+        and hcl_main.get_callback_status() == "LOOT"
+        and not is_claimed()
+    if (_G.lam2.has_queued_actions and _G.lam2.has_queued_actions()) or self_act.force_close or not keep_open then
+        if _G.liz_fdda_redone_body_search and _G.liz_fdda_redone_body_search.get_template_action_looting_end then
+            _G.lam2.add_action_first(_G.liz_fdda_redone_body_search.get_template_action_looting_end())
+        end
+        fra_active_corpse_id = nil
+        return _G.lam2.states.success
+    end
+    return _G.lam2.states.running
+end
+
+-- @z_func: HCL_FRA.stop_fra_body_search [internal:Play Loot Animation] | bind:hcl_patch_fra_body_search_lam2
+local function stop_fra_body_search()
+    if fra_active_corpse_id == nil then
+        return
+    end
+    fra_active_corpse_id = nil
+    if _G.lam2 and _G.lam2.get_action_with_tag then
+        local act = _G.lam2.get_action_with_tag("body_search")
+        if act then
+            act.force_close = true
+        end
+    end
+end
+
+-- @z_func: HCL_FRA.sync_fra_body_search [export:rule:Play Loot Animation] | bind:hcl_patch_fra_body_search_lam2
+function sync_fra_body_search(corpse, corpse_status, cb_status)
+    local should_run = (corpse_status == "VALID") and (cb_status == "LOOT") and (corpse ~= nil) and (not is_claimed())
+    if not should_run then
+        stop_fra_body_search()
+        return
+    end
+    local corpse_id = corpse:id()
+    if fra_active_corpse_id ~= nil and fra_active_corpse_id ~= corpse_id then
+        stop_fra_body_search()
+    end
+    if fra_active_corpse_id == corpse_id then
+        return
+    end
+    if not (_G.lam2 and _G.liz_fdda_redone_body_search) then
+        return
+    end
+    if _G.liz_fdda_redone_mcm and _G.liz_fdda_redone_mcm.get_config and _G.liz_fdda_redone_mcm.get_config("body_search/enable") ~= true then
+        return
+    end
+    if _G.lam2.is_running and _G.lam2.is_running() then
+        return
+    end
+    local a_start = _G.liz_fdda_redone_body_search.get_template_action_looting_start(corpse, true)
+    local a_idle = _G.liz_fdda_redone_body_search.get_template_action_looting_idle(corpse_id, true)
+    if not (a_start and a_idle) then
+        return
+    end
+    a_start.hcl_orig_enter = a_start.on_enter
+    a_start.on_enter = fra_start_on_enter
+    a_idle.is_ui_enabled = true
+    a_idle.is_input_enabled = true
+    a_idle.on_enter = fra_idle_on_enter
+    a_idle.on_execute = fra_idle_on_execute
+    fra_active_corpse_id = corpse_id
+    _G.lam2.add_action(a_start)
+    _G.lam2.add_action(a_idle)
+    z_probe(2, "hcl_patch.sync_fra_body_search", "Started headless LAM2 body_search on corpse id=%s", tostring(corpse_id))
+end
+
+-- [SYSTEM] HCL_LTTR
+
+local lttr_state = {
+    npc_id = nil,
+    vis_ids = {},
+    search_in_progress = false,
+    total_lootable = 0,
+}
+local lttr_next_poll_tg = 0
+local lttr_last_hash = nil
+local lttr_forced_revealed = {}
+local lttr_iter_scratch = {}
+
+local SPINNER_META_BASE = {
+    tile_w = 128,
+    tile_h = 128,
+    cols = 4,
+    frames = 13,
+    fps = 26,
+}
+
+local INDICATOR_META_BASE = {
+    tile_w = 256,
+    tile_h = 32,
+    cols = 4,
+    frames = 13,
+    fps = 26,
+    base_w = 140,
+    base_h = 21,
+}
+
+local lttr_cfg_ready = false
+local lttr_corpses_enabled = true
+local lttr_render_cache = nil
+
+-- @z_func: HCL_LTTR.rebuild_lttr_cache [internal:LTTR Looting Override] | bind:hcl_patch_lttr_progressive_search
+local function rebuild_lttr_cache()
+    if _G.zzzz_loot_searching == nil then
+        lttr_corpses_enabled = false
+        lttr_render_cache = nil
+        lttr_cfg_ready = true
+        return
+    end
+    local cfg_fn = _G.zzzz_loot_searching_mcm and _G.zzzz_loot_searching_mcm.get_config or nil
+    lttr_corpses_enabled = (not cfg_fn) or (cfg_fn("enable_corpses") ~= false)
+    local ph_mode = (cfg_fn and tonumber(cfg_fn("placeholder_mode"))) or 2
+    local spinner_style = (cfg_fn and cfg_fn("spinner_style")) or "tarkov_like"
+    local hud_enable = (not cfg_fn) or (cfg_fn("hud_enable") ~= false)
+    local hud_icon = hud_enable and ((cfg_fn and tonumber(cfg_fn("hud_icon"))) or 1) or 0
+    local ind_style = (cfg_fn and cfg_fn("hud_indicator_style")) or "fading_lines_dimmed"
+    local ind_scale_pct = (cfg_fn and tonumber(cfg_fn("hud_indicator_scale"))) or 70
+    lttr_render_cache = {
+        placeholder_mode = ph_mode,
+        spinner_atlas = {
+            enabled = (ph_mode == 2),
+            style = tostring(spinner_style),
+            texture = "ui\\loot_searching\\" .. tostring(spinner_style) .. "\\spinner_atlas",
+            tile_w = SPINNER_META_BASE.tile_w,
+            tile_h = SPINNER_META_BASE.tile_h,
+            cols = SPINNER_META_BASE.cols,
+            frames = SPINNER_META_BASE.frames,
+            fps = SPINNER_META_BASE.fps,
+        },
+        indicator_atlas = {
+            hud_icon = hud_icon,
+            style = tostring(ind_style),
+            texture = "ui\\loot_indicator\\" .. tostring(ind_style) .. "\\indicator_atlas",
+            tile_w = INDICATOR_META_BASE.tile_w,
+            tile_h = INDICATOR_META_BASE.tile_h,
+            cols = INDICATOR_META_BASE.cols,
+            frames = INDICATOR_META_BASE.frames,
+            fps = INDICATOR_META_BASE.fps,
+            base_w = INDICATOR_META_BASE.base_w,
+            base_h = INDICATOR_META_BASE.base_h,
+            scale = ind_scale_pct / 100.0,
+        },
+    }
+    lttr_cfg_ready = true
+end
+
+-- @z_func: HCL_Patch.is_lttr_enabled [export:output:HCL_LTTR] | bind:hcl_patch_lttr_progressive_search
+function is_lttr_enabled()
+    if _G.zzzz_loot_searching == nil then
+        return false
+    end
+    if not lttr_cfg_ready then
+        rebuild_lttr_cache()
+    end
+    return lttr_corpses_enabled
+end
+
+-- @z_func: HCL_LTTR.is_lootable_corpse_item [internal:LTTR Looting Override] | bind:hcl_patch_lttr_progressive_search
+local function is_lootable_corpse_item(item)
+    if not item then
+        return false
+    end
+    local sec = item:section()
+    if sec == "device_pda" or sec == "device_torch_dummy" or sec == "items_anm_dummy" then
+        return false
+    end
+    if sec ~= "bolt" and sec ~= "bolt_bullet" and IsItem("anim", sec) then
+        return false
+    end
+    local gw = ini_sys:r_float_ex(sec, "inv_grid_width", 0) or 0
+    return gw > 0
+end
+
+-- @z_func: HCL_LTTR.lttr_collect_lootable_cb [internal:LTTR Looting Override] | bind:hcl_patch_lttr_progressive_search
+local function lttr_collect_lootable_cb(owner, item)
+    if is_lootable_corpse_item(item) then
+        lttr_iter_scratch[#lttr_iter_scratch + 1] = item:id()
+    end
+end
+
+-- @z_func: HCL_Patch.stop_search [export:output:HCL_LTTR] | bind:hcl_patch_lttr_progressive_search
+function stop_search()
+    if lttr_state.npc_id == nil then
+        return
+    end
+    lttr_state.npc_id = nil
+    lttr_state.vis_ids = {}
+    lttr_state.search_in_progress = false
+    lttr_state.total_lootable = 0
+    lttr_last_hash = nil
+    lttr_next_poll_tg = 0
+    if _G.zzzz_loot_searching and type(_G.zzzz_loot_searching.GUI_on_hide) == "function" then
+        if actor_menu.get_last_mode() == 0 and _G.ui_inventory and _G.ui_inventory.GUI then
+            _G.ui_inventory.GUI.mode = "loot"
+            _G.zzzz_loot_searching.GUI_on_hide("UIInventory")
+        end
+    end
+end
+
+-- @z_func: HCL_LTTR.sync_corpse_search [export:rule:LTTR Looting Override] | bind:hcl_patch_lttr_progressive_search
+function sync_corpse_search(npc)
+    if not npc or not is_lttr_enabled() or is_claimed() then
+        stop_search()
+        return
+    end
+    local npc_id = npc:id()
+    local tg = time_global()
+    if lttr_state.npc_id ~= nil and lttr_state.npc_id ~= npc_id then
+        stop_search()
+    end
+    if lttr_state.npc_id == npc_id and tg < lttr_next_poll_tg then
+        return
+    end
+    local check_fn = orig_lttr_is_item_hidden or _G.zzzz_loot_searching.is_item_hidden
+    local forced_tbl = lttr_forced_revealed[npc_id]
+    -- Once all items on this corpse are revealed, skip heavy UIInventory:ParseInventory unless a newly spawned hidden item appears.
+    if lttr_state.npc_id == npc_id and (not lttr_state.search_in_progress) then
+        lttr_iter_scratch = {}
+        npc:iterate_inventory(lttr_collect_lootable_cb, npc)
+        local fast_cnt = #lttr_iter_scratch
+        local found_hidden = false
+        for i = 1, fast_cnt do
+            local iid = lttr_iter_scratch[i]
+            if (not (forced_tbl and forced_tbl[iid])) and (check_fn and check_fn(npc_id, iid) == true) then
+                found_hidden = true
+                break
+            end
+        end
+        if not found_hidden then
+            lttr_next_poll_tg = tg + 500
+            if fast_cnt ~= lttr_state.total_lootable then
+                lttr_state.total_lootable = fast_cnt
+                bump_patch_dirty()
+            end
+            return
+        end
+    end
+    lttr_next_poll_tg = tg + 100
+    if _G.ui_inventory and not _G.ui_inventory.GUI then
+        _G.ui_inventory.GUI = _G.ui_inventory.UIInventory()
+    end
+    local gui = _G.ui_inventory and _G.ui_inventory.GUI or nil
+    if not gui then
+        return
+    end
+    local prev_mode = gui.mode
+    local prev_npc_id = gui.npc_id
+    gui.mode = "loot"
+    gui.npc_id = npc_id
+    local ltt_vis = gui:ParseInventory(npc, true, true, true) or {}
+    if actor_menu.get_last_mode() ~= 4 then
+        gui.mode = prev_mode or "loot"
+        gui.npc_id = prev_npc_id or npc_id
+    end
+    local vis_copy = {}
+    local vis_cnt = 0
+    for id, _ in pairs(ltt_vis) do
+        vis_copy[id] = true
+        vis_cnt = vis_cnt + 1
+    end
+    lttr_iter_scratch = {}
+    npc:iterate_inventory(lttr_collect_lootable_cb, npc)
+    local total_cnt = #lttr_iter_scratch
+    local any_hidden = false
+    local rev_cnt = 0
+    for i = 1, total_cnt do
+        local iid = lttr_iter_scratch[i]
+        local hidden = (not (forced_tbl and forced_tbl[iid])) and (check_fn and check_fn(npc_id, iid) == true)
+        if hidden then
+            any_hidden = true
+        else
+            rev_cnt = rev_cnt + 1
+        end
+    end
+    lttr_state.npc_id = npc_id
+    lttr_state.vis_ids = vis_copy
+    lttr_state.search_in_progress = any_hidden
+    lttr_state.total_lootable = total_cnt
+    local cur_hash = tostring(npc_id) .. ":" .. tostring(total_cnt) .. ":" .. tostring(vis_cnt) .. ":" .. tostring(rev_cnt) .. ":" .. tostring(any_hidden)
+    if cur_hash ~= lttr_last_hash then
+        lttr_last_hash = cur_hash
+        bump_patch_dirty()
+    end
+end
+
+-- @z_func: HCL_Patch.update_lttr_search [export:output:HCL_LTTR] | bind:hcl_patch_lttr_progressive_search
+function update_lttr_search(npc)
+    sync_corpse_search(npc)
+end
+
+-- @z_func: HCL_Patch.get_item_reveal_state [export:output:HCL_LTTR] | bind:hcl_patch_lttr_progressive_search
+function get_item_reveal_state(npc_id, item_id)
+    if not is_lttr_enabled() or not npc_id or not item_id then
+        return "revealed"
+    end
+    local forced_tbl = lttr_forced_revealed[npc_id]
+    if forced_tbl and forced_tbl[item_id] then
+        return "revealed"
+    end
+    local check_fn = orig_lttr_is_item_hidden or _G.zzzz_loot_searching.is_item_hidden
+    if not (check_fn and check_fn(npc_id, item_id) == true) then
+        return "revealed"
+    end
+    if lttr_state.npc_id == npc_id and lttr_state.vis_ids[item_id] == true then
+        return "silhouette"
+    end
+    return "hidden"
+end
+
+-- @z_func: HCL_Patch.is_item_revealed [export:output:HCL_LTTR] | bind:hcl_patch_lttr_progressive_search
+function is_item_revealed(npc_id, item_id)
+    return get_item_reveal_state(npc_id, item_id) == "revealed"
+end
+
+-- @z_func: HCL_Patch.is_searching [export:output:HCL_LTTR] | bind:hcl_patch_lttr_progressive_search
+function is_searching(npc_id)
+    if not is_lttr_enabled() or not npc_id then
+        return false
+    end
+    return lttr_state.npc_id == npc_id and lttr_state.search_in_progress == true
+end
+
+-- @z_func: HCL_Patch.get_total_lootable_count [export:output:HCL_LTTR] | bind:hcl_patch_lttr_progressive_search
+function get_total_lootable_count(npc_id)
+    if lttr_state.npc_id == npc_id then
+        return lttr_state.total_lootable
+    end
+    return 0
+end
+
+-- @z_func: HCL_Patch.mark_item_revealed [export:output:HCL_LTTR] | bind:hcl_patch_lttr_progressive_search
+function mark_item_revealed(npc_id, item_id)
+    if not npc_id or not item_id then
+        return
+    end
+    if not lttr_forced_revealed[npc_id] then
+        lttr_forced_revealed[npc_id] = {}
+    end
+    lttr_forced_revealed[npc_id][item_id] = true
+    if _G.zzzz_loot_searching and type(_G.zzzz_loot_searching.reveal_item) == "function" then
+        pcall(_G.zzzz_loot_searching.reveal_item, npc_id, item_id)
+    end
+    bump_patch_dirty()
+end
+
+-- @z_func: HCL_Patch.get_lttr_render_config [export:output:HCL_LTTR] | bind:hcl_patch_lttr_progressive_search
+function get_lttr_render_config()
+    if not is_lttr_enabled() then
+        return nil
+    end
+    return lttr_render_cache
+end
+
+-- @z_func: HCL_Patch.get_atlas_frame_rect [export:output:HCL_LTTR] | bind:hcl_patch_lttr_progressive_search
+function get_atlas_frame_rect(meta)
+    local fps = (meta and meta.fps) or 26
+    local frames = (meta and meta.frames) or 13
+    local cols = (meta and meta.cols) or 4
+    local tw = (meta and meta.tile_w) or 128
+    local th = (meta and meta.tile_h) or 128
+    local frame_idx = math.floor(time_global() / (1000 / fps)) % frames
+    local col = frame_idx % cols
+    local row = math.floor(frame_idx / cols)
+    local x1 = col * tw
+    local y1 = row * th
+    return x1, y1, x1 + tw, y1 + th
+end
+
+-- [SYSTEM] HCL_WPO
+
+local wpo_redirect_actor_spawn = false
+
+-- @z_func: HCL_WPO.wpo_delayed_refresh_cb [internal:Field Strip] | bind:hcl_patch_wpo_fieldstrip_and_scope_clone
+local function wpo_delayed_refresh_cb()
+    bump_patch_dirty()
+    return true
+end
+
+-- @z_func: HCL_Patch.can_field_strip [export:output:HCL_WPO] | bind:hcl_patch_wpo_fieldstrip_and_scope_clone
+function can_field_strip(obj)
+    return obj ~= nil and IsWeapon(obj) and (not IsMelee(obj))
+end
+
+-- @z_func: HCL_WPO.resolve_scope_item_sec [internal:Weapon Attachment Removal Rule] | bind:hcl_patch_wpo_fieldstrip_and_scope_clone
+local function resolve_scope_item_sec(sec, parent_sec)
+    local direct = SYS_GetParam(0, sec, "scope_name")
+    if direct and ini_sys:section_exist(direct) then
+        return direct
+    end
+    local scopes_sect = SYS_GetParam(0, sec, "scopes_sect")
+    if scopes_sect and ini_sys:section_exist(scopes_sect) then
+        local from_sect = SYS_GetParam(0, scopes_sect, "scope_name")
+        if from_sect and ini_sys:section_exist(from_sect) then
+            return from_sect
+        end
+        if ini_sys:section_exist(scopes_sect) and SYS_GetParam(2, scopes_sect, "inv_grid_width", 0) > 0 then
+            return scopes_sect
+        end
+    end
+    if parent_sec and #sec > (#parent_sec + 1) then
+        local suffix = string.sub(sec, #parent_sec + 2)
+        if suffix ~= "" and ini_sys:section_exist(suffix) then
+            return suffix
+        end
+    end
+    return nil
+end
+
+-- @z_func: HCL_WPO.detach_weapon_addons_ordered [export:rule:Weapon Attachment Removal Rule] | bind:hcl_patch_wpo_fieldstrip_and_scope_clone
+function detach_weapon_addons_ordered(wpn)
+    local sec = wpn:section()
+    local removed_addons = {}
+    local cleared_addon_mask = 0
+
+    -- Pass b_spawn_item=false to CWeapon:weapon_addon_detach so C++ detaches the flag without spawning a second copy onto the corpse.
+    local sil_status = (wpn.weapon_silencer_status and wpn:weapon_silencer_status()) or SYS_GetParam(2, sec, "silencer_status", 0)
+    if sil_status == 2 and wpn.weapon_is_silencer and wpn:weapon_is_silencer() then
+        local sil_sec = (_G.utils_item and _G.utils_item.get_attached_silencer and _G.utils_item.get_attached_silencer(wpn)) or SYS_GetParam(0, sec, "silencer_name")
+        if sil_sec and ini_sys:section_exist(sil_sec) then
+            if wpn.weapon_addon_detach then
+                wpn:weapon_addon_detach(sil_sec, false)
+            end
+            alife_create_item(sil_sec, db.actor)
+            cleared_addon_mask = bit.bor(cleared_addon_mask, 4)
+            removed_addons[#removed_addons + 1] = sil_sec
+        end
+    end
+
+    local gl_status = (wpn.weapon_grenadelauncher_status and wpn:weapon_grenadelauncher_status()) or SYS_GetParam(2, sec, "grenade_launcher_status", 0)
+    if gl_status == 2 and wpn.weapon_is_grenadelauncher and wpn:weapon_is_grenadelauncher() then
+        local gl_sec = (_G.utils_item and _G.utils_item.get_attached_gl and _G.utils_item.get_attached_gl(wpn)) or SYS_GetParam(0, sec, "grenade_launcher_name")
+        if gl_sec and ini_sys:section_exist(gl_sec) then
+            if wpn.weapon_addon_detach then
+                wpn:weapon_addon_detach(gl_sec, false)
+            end
+            alife_create_item(gl_sec, db.actor)
+            cleared_addon_mask = bit.bor(cleared_addon_mask, 2)
+            removed_addons[#removed_addons + 1] = gl_sec
+        end
+    end
+
+    return removed_addons, cleared_addon_mask
+end
+
+-- @z_func: HCL_WPO.run_wpo_field_strip [export:rule:Field Strip] | bind:hcl_patch_wpo_fieldstrip_and_scope_clone
+function run_wpo_field_strip(wpn, corpse)
+    if not can_field_strip(wpn) or not db.actor then
+        return false, wpn and wpn:id() or nil
+    end
+    local wpn_id = wpn:id()
+    local sec = wpn:section()
+    local npc_id = corpse and corpse:id() or nil
+    local result_wpn_id = wpn_id
+    local msg_lines = {}
+    local did_any = false
+    local did_unload_ammo = false
+    local raw_w = (_G.utils_xml and _G.utils_xml.get_color) and _G.utils_xml.get_color("pda_white", false) or "%c[default]"
+    local pda_w = (type(raw_w) == "string" and raw_w ~= "") and raw_w or "%c[default]"
+
+    -- Step 1: Unload underbarrel grenade, AMR/wuut magazine, and chamber/internal ammo BEFORE reading stpk or cloning.
+    local in_gl_mode = (wpn.weapon_in_grenade_mode and wpn:weapon_in_grenade_mode()) or false
+    if in_gl_mode then
+        local gl_ammo = (wpn.get_ammo_in_magazine and wpn:get_ammo_in_magazine()) or 0
+        if gl_ammo > 0 then
+            local gl_list = parse_list(ini_sys, sec, "grenade_class")
+            local gl_idx = ((wpn.get_ammo_type and wpn:get_ammo_type()) or 0) + 1
+            local gl_ammo_sec = gl_list and (gl_list[gl_idx] or gl_list[1]) or nil
+            if gl_ammo_sec and ini_sys:section_exist(gl_ammo_sec) then
+                if create_ammo then
+                    create_ammo(gl_ammo_sec, db.actor:position(), db.actor:level_vertex_id(), db.actor:game_vertex_id(), db.actor:id(), gl_ammo)
+                else
+                    alife_create_item(gl_ammo_sec, db.actor, { ammo = gl_ammo })
+                end
+                if wpn.force_unload_magazine then
+                    wpn:force_unload_magazine(false)
+                end
+                if wpn.set_ammo_elapsed then
+                    wpn:set_ammo_elapsed(0)
+                end
+                did_any = true
+                did_unload_ammo = true
+            end
+        end
+    end
+
+    -- Guard AMR "no_mag" false positive: mag_support.is_mag_loaded checks get_data(id) ~= nil which stays true on {section="no_mag"}.
+    if (not in_gl_mode) and _G.mag_support and _G.mag_support.using_mags and _G.mag_support.using_mags() then
+        local has_loaded_mag = false
+        if _G.magazine_binder ~= nil and type(_G.magazine_binder.get_mag_loaded) == "function" then
+            has_loaded_mag = (_G.magazine_binder.get_mag_loaded(wpn_id) ~= nil)
+        elseif _G.wuut_mags ~= nil and type(_G.wuut_mags.MagazineInWeaponIsValid) == "function" then
+            has_loaded_mag = (_G.wuut_mags.MagazineInWeaponIsValid(wpn) == true)
+        elseif _G.mag_support.is_mag_loaded then
+            has_loaded_mag = (_G.mag_support.is_mag_loaded(wpn) == true)
+        end
+        if has_loaded_mag then
+            wpo_redirect_actor_spawn = true
+            local eject_fn = (_G.magazines and type(_G.magazines.eject_magazine) == "function" and not _G.wuut_mags) and _G.magazines.eject_magazine or _G.mag_support.eject_mag
+            local ok, res = pcall(eject_fn, wpn)
+            wpo_redirect_actor_spawn = false
+            local mag_cleared = false
+            if _G.magazine_binder ~= nil and type(_G.magazine_binder.get_mag_loaded) == "function" then
+                mag_cleared = (_G.magazine_binder.get_mag_loaded(wpn_id) == nil)
+            end
+            if ok and ((res ~= nil and res ~= false) or mag_cleared) then
+                did_any = true
+                did_unload_ammo = true
+            end
+        end
+    end
+
+    local ammo_in_mag = (wpn.get_ammo_in_magazine and wpn:get_ammo_in_magazine()) or 0
+    if ammo_in_mag > 0 then
+        local ammo_sec = nil
+        if wpn.weapon_in_grenade_mode and wpn:weapon_in_grenade_mode() then
+            local gl_list = parse_list(ini_sys, sec, "grenade_class")
+            local gl_idx = ((wpn.get_ammo_type and wpn:get_ammo_type()) or 0) + 1
+            ammo_sec = gl_list and (gl_list[gl_idx] or gl_list[1]) or nil
+        else
+            if _G.magazines and type(_G.magazines.get_sec_chambered) == "function" then
+                local ch_sec = _G.magazines.get_sec_chambered(wpn)
+                if type(ch_sec) == "string" and ch_sec ~= "" and ini_sys:section_exist(ch_sec) then
+                    ammo_sec = ch_sec
+                end
+            end
+            if not ammo_sec then
+                local ammo_list = parse_list(ini_sys, sec, "ammo_class")
+                local ammo_idx = ((wpn.get_ammo_type and wpn:get_ammo_type()) or 0) + 1
+                ammo_sec = ammo_list and (ammo_list[ammo_idx] or ammo_list[1]) or nil
+            end
+        end
+        if ammo_sec and ini_sys:section_exist(ammo_sec) then
+            if create_ammo then
+                create_ammo(ammo_sec, db.actor:position(), db.actor:level_vertex_id(), db.actor:game_vertex_id(), db.actor:id(), ammo_in_mag)
+            else
+                alife_create_item(ammo_sec, db.actor, { ammo = ammo_in_mag })
+            end
+            if wpn.force_unload_magazine then
+                wpn:force_unload_magazine(false)
+            end
+            if wpn.set_ammo_elapsed then
+                wpn:set_ammo_elapsed(0)
+            end
+            did_any = true
+            did_unload_ammo = true
+        end
+    end
+
+    -- Step 2: Strip eligible non-barrel WPO parts >= min_cond BEFORE any alife_clone_weapon call so copy_parts_con copies -1 states.
+    local stripped_part = false
+    if _G.zzzz_arti_jamming_repairs ~= nil and _G.arti_jamming ~= nil and _G.item_parts ~= nil then
+        local parts = _G.item_parts.get_parts_con(wpn, nil, true)
+        if parts then
+            local min_cond = (hcl_mcm and tonumber(hcl_mcm.get_config("hcl_mcm_wpn_prt_min_cond"))) or 60
+            local part_keys = {}
+            for k, _ in pairs(parts) do
+                part_keys[#part_keys + 1] = k
+            end
+            table.sort(part_keys)
+            for i = 1, #part_keys do
+                local pk = part_keys[i]
+                local pv = parts[pk]
+                local is_p = (_G.arti_jamming.is_part and _G.arti_jamming.is_part(pk)) or (string.find(pk, "^prt_w_") ~= nil)
+                local is_b = _G.arti_jamming.is_barrel and _G.arti_jamming.is_barrel(pk) or false
+                if is_p and (not is_b) and type(pv) == "number" and pv >= min_cond then
+                    alife_create_item(pk, db.actor, { cond = pv / 100 })
+                    parts[pk] = -1
+                    stripped_part = true
+                    did_any = true
+                    local raw_clr = (_G.utils_xml and _G.utils_xml.get_color_con) and _G.utils_xml.get_color_con(pv) or ""
+                    local clr_str = (type(raw_clr) == "string") and raw_clr or ""
+                    local p_name = (ui_item and ui_item.get_sec_name and ui_item.get_sec_name(pk)) or pk
+                    -- Embed "\\n- " strictly inside the active pda_w text span (never adjacent to %c[...] on either side) so C++ CUILines::CutFirstColoredTextEntry preserves every line break.
+                    msg_lines[#msg_lines + 1] = "\\n- " .. tostring(p_name) .. " (" .. clr_str .. tostring(math.floor(pv)) .. "%" .. pda_w .. ")"
+                end
+            end
+            if stripped_part then
+                _G.item_parts.set_parts_con(wpn_id, parts)
+                if _G.arti_jamming.reset_cgd then
+                    _G.arti_jamming.reset_cgd()
+                end
+            end
+        end
+    end
+
+    -- Step 3: Detach silencer (bit 4) and grenade launcher (bit 2) without spawning duplicate corpse addons.
+    local removed_addons, cleared_addon_mask = detach_weapon_addons_ordered(wpn)
+    for i = 1, #removed_addons do
+        local a_sec = removed_addons[i]
+        local a_name = (ui_item and ui_item.get_sec_name and ui_item.get_sec_name(a_sec)) or a_sec
+        msg_lines[#msg_lines + 1] = "\\n- " .. tostring(a_name)
+        did_any = true
+    end
+
+    -- Step 4: Detach scope, commit zeroed stpk.ammo_elapsed + cleared addon_flags, and clone safely when needed.
+    local clone_target_sec = nil
+    local parent_sec = SYS_GetParam(0, sec, "parent_section")
+    if parent_sec and parent_sec ~= "" and parent_sec ~= sec then
+        local scope_sec = resolve_scope_item_sec(sec, parent_sec)
+        if scope_sec then
+            alife_create_item(scope_sec, db.actor)
+            local s_name = (ui_item and ui_item.get_sec_name and ui_item.get_sec_name(scope_sec)) or scope_sec
+            msg_lines[#msg_lines + 1] = "\\n- " .. tostring(s_name)
+            did_any = true
+            clone_target_sec = parent_sec
+        end
+    else
+        local scope_status = (wpn.weapon_scope_status and wpn:weapon_scope_status()) or SYS_GetParam(2, sec, "scope_status", 0)
+        if scope_status == 2 and wpn.weapon_is_scope and wpn:weapon_is_scope() then
+            local native_scope = (_G.utils_item and _G.utils_item.get_attached_scope and _G.utils_item.get_attached_scope(wpn)) or SYS_GetParam(0, sec, "scope_name")
+            if native_scope and ini_sys:section_exist(native_scope) then
+                if wpn.weapon_addon_detach then
+                    wpn:weapon_addon_detach(native_scope, false)
+                end
+                alife_create_item(native_scope, db.actor)
+                cleared_addon_mask = bit.bor(cleared_addon_mask, 1)
+                local s_name = (ui_item and ui_item.get_sec_name and ui_item.get_sec_name(native_scope)) or native_scope
+                msg_lines[#msg_lines + 1] = "\\n- " .. tostring(s_name)
+                did_any = true
+                clone_target_sec = sec
+            end
+        end
+    end
+
+    if clone_target_sec == nil and cleared_addon_mask ~= 0 then
+        local sil_stuck = (bit.band(cleared_addon_mask, 4) ~= 0) and (wpn.weapon_is_silencer and wpn:weapon_is_silencer())
+        local gl_stuck = (bit.band(cleared_addon_mask, 2) ~= 0) and (wpn.weapon_is_grenadelauncher and wpn:weapon_is_grenadelauncher())
+        if sil_stuck or gl_stuck then
+            clone_target_sec = sec
+        end
+    end
+
+    local se_wpn = (did_unload_ammo or cleared_addon_mask ~= 0 or clone_target_sec ~= nil) and alife_object(wpn_id) or nil
+    if se_wpn and _G.utils_stpk and _G.utils_stpk.get_weapon_data and _G.utils_stpk.set_weapon_data then
+        local stpk = _G.utils_stpk.get_weapon_data(se_wpn)
+        if stpk then
+            local cur_ammo = (wpn.get_ammo_in_magazine and wpn:get_ammo_in_magazine()) or 0
+            if did_unload_ammo or cur_ammo == 0 then
+                stpk.ammo_elapsed = 0
+            end
+            if cleared_addon_mask ~= 0 then
+                stpk.addon_flags = bit.band(tonumber(stpk.addon_flags) or 0, bit.bnot(cleared_addon_mask))
+            end
+            _G.utils_stpk.set_weapon_data(stpk, se_wpn)
+        end
+    end
+
+    if clone_target_sec ~= nil and se_wpn and alife_clone_weapon then
+        local se_new = alife_clone_weapon(se_wpn, clone_target_sec)
+        if se_new then
+            result_wpn_id = se_new.id
+            if npc_id then
+                mark_item_revealed(npc_id, se_new.id)
+            end
+            CreateTimeEvent("hcl_wpo_clone", "clone_" .. tostring(se_new.id), 0.10, wpo_delayed_refresh_cb)
+        end
+    end
+
+    -- Step 5: Strict no-op guard so empty/stripped weapons emit zero sound, zero PDA tip, and zero clone.
+    if not did_any then
+        return false, wpn_id
+    end
+
+    if utils_obj and utils_obj.play_sound then
+        local fs = getFS and getFS() or nil
+        -- Guard VFS sound existence: inv_part_weapon.ogg belongs to Oleh's Misc Sound Improvements; fall back to vanilla inv_detach_addon for part/addon strip and native actor_on_item_take audio for ammo-only unload.
+        if stripped_part and fs and fs:exist("$game_sounds$", "interface\\inv_part_weapon.ogg") ~= nil then
+            utils_obj.play_sound("interface\\inv_part_weapon")
+        elseif stripped_part or cleared_addon_mask ~= 0 or clone_target_sec ~= nil or #removed_addons > 0 then
+            utils_obj.play_sound("interface\\inv_detach_addon")
+        end
+    end
+    if #msg_lines > 0 and news_manager and news_manager.send_tip then
+        local hdr = game.translate_string("st_news_fieldstrip")
+        if not hdr or hdr == "" or hdr == "st_news_fieldstrip" then
+            hdr = "Field Stripped:"
+        end
+        news_manager.send_tip(db.actor, pda_w .. hdr .. table.concat(msg_lines, ""), nil, "swiss_knife", 6000)
+    end
+    bump_patch_dirty()
+    return true, result_wpn_id
+end
+
+-- @z_func: HCL_Patch.field_strip_weapon [export:output:HCL_WPO] | bind:hcl_patch_wpo_fieldstrip_and_scope_clone
+function field_strip_weapon(wpn, corpse)
+    return run_wpo_field_strip(wpn, corpse)
+end
+
+-- [SYSTEM] HCL_IUI
+
+local iui_state = {
+    initialized = false,
+    has_utjan = false,
+    has_dyneq = false,
+    has_fetch = false,
+    hides_gun_cond = false,
+    repair_textures = {},
+    comm_patches = {
+        stalker = "ui_inGame2_circle_stalker",
+        bandit = "ui_inGame2_circle_bandit",
+        csky = "ui_inGame2_circle_csky",
+        dolg = "ui_inGame2_circle_dolg",
+        freedom = "ui_inGame2_circle_freedom",
+        army = "ui_inGame2_circle_army",
+        ecolog = "ui_inGame2_circle_ecolog",
+        killer = "ui_inGame2_circle_killer",
+        monolith = "ui_inGame2_circle_monolith",
+        greh = "ui_inGame2_circle_sin",
+        isg = "ui_inGame2_circle_isg",
+        renegade = "ui_inGame2_circle_renegade",
+    },
+}
+
+local PART_FALLBACK_ORDER = {
+    barrel = 1,
+    trigger = 2,
+    reciever = 3,
+    receiver = 3,
+    spring = 4,
+    gas = 5,
+}
+
+-- @z_func: HCL_IUI.init_iui_runtime [internal:Item UI Overlay and Stacking Policy] | bind:hcl_patch_iui_overlays_and_stacking
+local function init_iui_runtime()
+    if iui_state.initialized then
+        return
+    end
+    iui_state.has_utjan = (_G.z_item_icon_info ~= nil)
+    iui_state.has_dyneq = (_G.dynamic_eq_icon ~= nil and type(_G.dynamic_eq_icon.dyneq_armorfaction) == "function")
+    iui_state.has_fetch = (_G.fetch_item_icon ~= nil and type(_G.fetch_item_icon.fetch_item_icon) == "function")
+    iui_state.hides_gun_cond = (_G.grok_gun_no_condition_text ~= nil)
+    local ok_eq, eq_ini = pcall(ini_file, "plugins\\eq_icons_settings.ltx")
+    if ok_eq and eq_ini then
+        local secs = { "repair_type_icons", "gun_repair_icons", "armor_repair_icons" }
+        for s_idx = 1, #secs do
+            local sec_name = secs[s_idx]
+            if eq_ini:section_exist(sec_name) then
+                local cnt = eq_ini:line_count(sec_name)
+                for i = 0, cnt - 1 do
+                    local _, k, v = eq_ini:r_line(sec_name, i, "", "")
+                    if k and k ~= "" and v and v ~= "" then
+                        local tex = string.match(v, "^([^,%s]+)")
+                        if tex then
+                            iui_state.repair_textures[k] = tex
+                        end
+                    end
+                end
+            end
+        end
+    end
+    iui_state.initialized = true
+end
+
+-- @z_func: HCL_Patch.can_stack_items [export:output:HCL_IUI] | bind:hcl_patch_iui_overlays_and_stacking
+function can_stack_items(obj_a, obj_b, npc_id)
+    if not (obj_a and obj_b) or obj_a:id() == obj_b:id() then
+        return false
+    end
+    local sec = obj_a:section()
+    if sec ~= obj_b:section() then
+        return false
+    end
+    if not (is_item_revealed(npc_id, obj_a:id()) and is_item_revealed(npc_id, obj_b:id())) then
+        return false
+    end
+    if SYS_GetParam(1, sec, "dont_stack") then
+        return false
+    end
+    if _G.utils_item and _G.utils_item.has_upgrades and (_G.utils_item.has_upgrades(obj_a) or _G.utils_item.has_upgrades(obj_b)) then
+        return false
+    end
+    if _G.magazine_binder and _G.magazine_binder.is_magazine and _G.magazine_binder.is_magazine(sec) then
+        local md_a = _G.magazine_binder.get_data(obj_a:id())
+        local md_b = _G.magazine_binder.get_data(obj_b:id())
+        local cnt_a = (md_a and md_a.loaded) and #md_a.loaded or 0
+        local cnt_b = (md_b and md_b.loaded) and #md_b.loaded or 0
+        return cnt_a == 0 and cnt_b == 0
+    end
+    local max_uses = IsItem("multiuse", sec)
+    if max_uses then
+        init_iui_runtime()
+        local stacks_to_uses = iui_state.has_utjan and _G.z_item_icon_info.settings and _G.z_item_icon_info.settings.stacks_to_uses
+        if stacks_to_uses then
+            return true
+        end
+        return obj_a:get_remaining_uses() == max_uses and obj_b:get_remaining_uses() == max_uses
+    end
+    local clsid = obj_a:clsid()
+    local use_cond = SYS_GetParam(1, sec, "use_condition") or IsWeapon(nil, clsid) or IsOutfit(nil, clsid) or IsHeadgear(nil, clsid)
+    if use_cond then
+        return math.abs(obj_a:condition() - obj_b:condition()) < 0.01
+    end
+    return true
+end
+
+-- @z_func: HCL_IUI.compute_cond_argb [internal:Item UI Overlay and Stacking Policy] | bind:hcl_patch_iui_overlays_and_stacking
+local function compute_cond_argb(cond_01)
+    if cond_01 >= 0.75 then
+        return GetARGB(255, 110, 235, 110)
+    elseif cond_01 >= 0.50 then
+        return GetARGB(255, 235, 225, 95)
+    elseif cond_01 >= 0.25 then
+        return GetARGB(255, 240, 155, 65)
+    end
+    return GetARGB(255, 235, 75, 75)
+end
+
+-- @z_func: HCL_IUI.fallback_part_rank [internal:Item UI Overlay and Stacking Policy] | bind:hcl_patch_iui_overlays_and_stacking
+local function fallback_part_rank(part_name)
+    for token, rank in pairs(PART_FALLBACK_ORDER) do
+        if string.find(part_name, token, 1, true) then
+            return rank
+        end
+    end
+    return 99
+end
+
+-- @z_func: HCL_IUI.part_key_cmp [internal:Item UI Overlay and Stacking Policy] | bind:hcl_patch_iui_overlays_and_stacking
+local function part_key_cmp(a, b)
+    if iui_state.has_utjan and _G.z_item_icon_info and type(_G.z_item_icon_info.parts_sort) == "function" then
+        local ab = _G.z_item_icon_info.parts_sort(nil, a, b)
+        local ba = _G.z_item_icon_info.parts_sort(nil, b, a)
+        if ab ~= ba then
+            return ab == true
+        end
+    end
+    local ra = fallback_part_rank(a)
+    local rb = fallback_part_rank(b)
+    if ra ~= rb then
+        return ra < rb
+    end
+    return a < b
+end
+
+-- @z_func: HCL_IUI.build_part_dots [internal:Item UI Overlay and Stacking Policy] | bind:hcl_patch_iui_overlays_and_stacking
+local function build_part_dots(obj, clsid)
+    if not (_G.item_parts and _G.item_parts.get_parts_con) then
+        return nil
+    end
+    local is_wpn = IsWeapon(nil, clsid) and (not IsMelee(obj))
+    local is_arm = IsOutfit(nil, clsid) or IsHeadgear(nil, clsid)
+    if not (is_wpn or is_arm) then
+        return nil
+    end
+    local se_parts = _G.item_parts.get_parts_con(obj, nil, true)
+    if not se_parts then
+        return nil
+    end
+    local keys = {}
+    for part, _ in pairs(se_parts) do
+        if SYS_GetParam(1, part, "cond_part") then
+            keys[#keys + 1] = part
+        end
+    end
+    if #keys == 0 then
+        return nil
+    end
+    table.sort(keys, part_key_cmp)
+    local pd_cfg = (iui_state.has_utjan and _G.z_item_icon_info.settings and _G.z_item_icon_info.settings.part_dots) or nil
+    local wpo_green = (pd_cfg and tonumber(pd_cfg.wpo_green)) or 60
+    local wpo_yellow = (pd_cfg and tonumber(pd_cfg.wpo_yellow)) or 35
+    local wpo_orange = (pd_cfg and tonumber(pd_cfg.wpo_orange)) or 15
+    local dots = {}
+    for i = 1, #keys do
+        local p = keys[i]
+        local c = tonumber(se_parts[p]) or -1
+        local clr
+        if c < 0 then
+            clr = GetARGB(220, 75, 75, 75)
+        elseif is_wpn then
+            if c >= wpo_green then
+                clr = GetARGB(255, 85, 225, 95)
+            elseif c >= wpo_yellow then
+                clr = GetARGB(255, 240, 220, 80)
+            elseif c >= wpo_orange then
+                clr = GetARGB(255, 240, 145, 55)
+            else
+                clr = GetARGB(255, 235, 70, 70)
+            end
+        else
+            clr = compute_cond_argb(c / 100.0)
+        end
+        dots[#dots + 1] = { part = p, cond = c, color = clr }
+    end
+    return dots
+end
+
+-- @z_func: HCL_IUI.evaluate_iui_overlay_policy [export:rule:Item UI Overlay and Stacking Policy] | bind:hcl_patch_iui_overlays_and_stacking
+function evaluate_iui_overlay_policy(obj, stack_items, npc_id)
+    if not obj then
+        return { is_silhouette = false, reveal_state = "revealed" }
+    end
+    init_iui_runtime()
+    local item_id = obj:id()
+    local rev_state = get_item_reveal_state(npc_id, item_id)
+    if rev_state ~= "revealed" then
+        return {
+            is_silhouette = true,
+            reveal_state = rev_state,
+        }
+    end
+    local sec = obj:section()
+    local clsid = obj:clsid()
+    local spec = {
+        is_silhouette = false,
+        reveal_state = "revealed",
+        cond_text = nil,
+        cond_ratio = nil,
+        cond_color = nil,
+        part_dots = nil,
+        repair_icon = nil,
+        repair_label = nil,
+        armor_patch = nil,
+        quest_icon = nil,
+        upgrade_icon = nil,
+        recipe_badge = nil,
+        count_text = nil,
+        ammo_short_text = nil,
+        ammo_short_color = nil,
+    }
+
+    local is_mag = (_G.magazine_binder ~= nil and _G.magazine_binder.is_magazine and _G.magazine_binder.is_magazine(sec)) or false
+    local max_uses = IsItem("multiuse", sec)
+    local is_firearm = IsWeapon(obj) and (not IsMelee(obj))
+    local has_cond = ((_G.utils_item and _G.utils_item.is_degradable and _G.utils_item.is_degradable(obj, sec)) or IsWeapon(nil, clsid) or IsOutfit(nil, clsid) or IsHeadgear(nil, clsid)) and (not max_uses) and (not is_mag)
+
+    if hcl_mcm and hcl_mcm.get_config("hcl_mcm_cond") == true and has_cond then
+        if not (iui_state.hides_gun_cond and is_firearm) then
+            local c_val = math.max(0, math.min(1, obj:condition() or 1))
+            spec.cond_ratio = c_val
+            spec.cond_text = tostring(math.ceil(c_val * 100)) .. "%"
+            spec.cond_color = compute_cond_argb(c_val)
+        end
+    end
+
+    if hcl_mcm and hcl_mcm.get_config("hcl_mcm_parts_cond") == true then
+        spec.part_dots = build_part_dots(obj, clsid)
+    end
+
+    if hcl_mcm and hcl_mcm.get_config("hcl_mcm_parts_repair_type") == true then
+        local rep_type = SYS_GetParam(0, sec, "repair_type")
+        if rep_type and rep_type ~= "" then
+            spec.repair_icon = iui_state.repair_textures[rep_type]
+            spec.repair_label = string.upper(string.sub(rep_type, 1, 2))
+        end
+    end
+
+    if hcl_mcm and hcl_mcm.get_config("hcl_mcm_patches_on_armor") == true and (IsOutfit(nil, clsid) or IsItem("outfit", sec)) then
+        if iui_state.has_dyneq and _G.z_item_icon_info and _G.z_item_icon_info.settings and _G.z_item_icon_info.settings.armor_info then
+            local orig_sp = _G.z_item_icon_info.settings.armor_info.show_patch
+            _G.z_item_icon_info.settings.armor_info.show_patch = true
+            local ok_p, patch_res = pcall(_G.dynamic_eq_icon.dyneq_armorfaction, nil, obj, sec)
+            _G.z_item_icon_info.settings.armor_info.show_patch = orig_sp
+            if ok_p and patch_res and patch_res.texture then
+                spec.armor_patch = patch_res
+            end
+        end
+        if not spec.armor_patch then
+            local comm = SYS_GetParam(0, sec, "community")
+            local p_tex = comm and iui_state.comm_patches[comm] or nil
+            if p_tex then
+                spec.armor_patch = { texture = p_tex, w = 14, h = 14 }
+            end
+        end
+    end
+
+    if iui_state.has_fetch then
+        local ok_f, fetch_res = pcall(_G.fetch_item_icon.fetch_item_icon, nil, obj, sec)
+        if ok_f and fetch_res and fetch_res.texture then
+            spec.quest_icon = fetch_res.texture
+        end
+    elseif SYS_GetParam(1, sec, "quest_item") == true or SYS_GetParam(0, sec, "kind") == "i_quest" then
+        spec.quest_icon = "ui_inGame2_PDA_icon_Secondary_mission"
+    end
+
+    if _G.utils_item and _G.utils_item.has_upgrades and _G.utils_item.has_upgrades(obj) then
+        spec.upgrade_icon = "ui_grid_icon_upgraded"
+    end
+
+    if IsItem("recipe", sec) then
+        local known = (_G.ui_pda_encyclopedia_tab and _G.ui_pda_encyclopedia_tab.is_unlocked_note and _G.ui_pda_encyclopedia_tab.is_unlocked_note("encyclopedia__notes_" .. sec)) or false
+        spec.recipe_badge = known and "known" or "new"
+    end
+
+    local items = stack_items or { obj }
+    local n_items = #items
+    if IsAmmo(obj) then
+        local total_rounds = 0
+        for i = 1, n_items do
+            local it = items[i]
+            total_rounds = total_rounds + ((it and it.ammo_get_count and it:ammo_get_count()) or 1)
+        end
+        spec.count_text = "x" .. tostring(total_rounds)
+        if not SYS_GetParam(1, sec, "is_component") then
+            local short_id = SYS_GetParam(0, sec, "inv_name_short")
+            if short_id and short_id ~= "" then
+                spec.ammo_short_text = game.translate_string(short_id)
+                if string.find(sec, "_verybad", 1, true) then
+                    spec.ammo_short_color = GetARGB(255, 235, 75, 75)
+                elseif string.find(sec, "_bad", 1, true) then
+                    spec.ammo_short_color = GetARGB(255, 240, 155, 65)
+                else
+                    spec.ammo_short_color = GetARGB(255, 215, 225, 215)
+                end
+            end
+        end
+    elseif is_mag then
+        if n_items > 1 then
+            spec.count_text = "x" .. tostring(n_items)
+        else
+            local mag_cnt = get_magazine_ammo_count(obj) or 0
+            local max_sz = SYS_GetParam(2, sec, "max_mag_size", mag_cnt) or mag_cnt
+            spec.count_text = tostring(mag_cnt) .. "/" .. tostring(max_sz)
+        end
+    elseif max_uses then
+        local total_uses = 0
+        for i = 1, n_items do
+            local it = items[i]
+            total_uses = total_uses + ((it and it.get_remaining_uses and it:get_remaining_uses()) or 1)
+        end
+        if n_items > 1 or total_uses > 1 then
+            spec.count_text = "x" .. tostring(total_uses)
+        end
+    elseif n_items > 1 then
+        spec.count_text = "x" .. tostring(n_items)
+    end
+    return spec
+end
+
+-- @z_func: HCL_Patch.get_cell_overlay_spec [export:output:HCL_IUI] | bind:hcl_patch_iui_overlays_and_stacking
+function get_cell_overlay_spec(obj, stack_items, npc_id)
+    return evaluate_iui_overlay_policy(obj, stack_items, npc_id)
+end
+
+-- @z_func: HCL_IUI.return_false_fn [internal:Item UI Overlay and Stacking Policy] | bind:hcl_patch_iui_overlays_and_stacking
+local function return_false_fn()
+    return false
+end
+
+local cc_reinit_npc_id = nil
+local cc_reinit_cols = 6
+local cc_reinit_items_map = nil
+local orig_mcm_get_for_cc = nil
+
+-- @z_func: HCL_Patch.get_effective_grid_wh [export:output:HCL_SPM] | bind:hcl_patch_global_and_spm
+function get_effective_grid_wh(sec)
+    if sec then
+        local cached = sec_wh_cache[sec]
+        if cached then
+            return cached[1], cached[2]
+        end
+    end
+    local gw, gh
+    if sec and _G.utils_xml and _G.utils_xml.get_item_axis then
+        local axis = _G.utils_xml.get_item_axis(sec, 1)
+        if axis and axis.w and axis.h then
+            gw = math.max(1, math.floor(axis.w + 0.5))
+            gh = math.max(1, math.floor(axis.h + 0.5))
+            sec_wh_cache[sec] = { gw, gh }
+            return gw, gh
+        end
+    end
+    gw = math.max(1, math.floor((SYS_GetParam(2, sec, "inv_grid_width", 1) or 1) + 0.5))
+    gh = math.max(1, math.floor((SYS_GetParam(2, sec, "inv_grid_height", 1) or 1) + 0.5))
+    if sec then
+        sec_wh_cache[sec] = { gw, gh }
+    end
+    return gw, gh
+end
+
+-- @z_func: HCL_Patch.compute_grid_cols [export:output:HCL_SPM] | bind:hcl_patch_global_and_spm
+function compute_grid_cols(main_x, ratio)
+    local r = tonumber(ratio) or 0.75
+    local step_x = 41 * r + 2
+    local avail_w = math.max(45, (tonumber(main_x) or 300) - 12)
+    return math.max(1, math.floor((avail_w - 2) / step_x))
+end
+
+-- @z_func: HCL_Patch.pack_corpse_stacks_2d [export:output:HCL_SPM] | bind:hcl_patch_global_and_spm
+function pack_corpse_stacks_2d(stacks, cols, npc_id, raw_items)
+    local occ = {}
+    local row_end = 0
+    local r_kind_last = false
+    local r_kind_row = 1
+    local by_row = {}
+    local row_keys = {}
+
+    for i = 1, #stacks do
+        local cell = stacks[i]
+        local w = math.min(cell.grid_w, cols)
+        local h = cell.grid_h
+        if r_kind_last ~= cell.cat_rank then
+            r_kind_last = cell.cat_rank
+            r_kind_row = row_end + 1
+        end
+        local placed_r, placed_c = nil, nil
+        local r = r_kind_row
+        while not placed_r do
+            for c = 1, (cols + 1 - w) do
+                local free = true
+                for rr = r, r + h - 1 do
+                    local orow = occ[rr]
+                    if orow then
+                        for cc = c, c + w - 1 do
+                            if orow[cc] then
+                                free = false
+                                break
+                            end
+                        end
+                    end
+                    if not free then break end
+                end
+                if free then
+                    placed_r, placed_c = r, c
+                    break
+                end
+            end
+            r = r + 1
+        end
+        for rr = placed_r, placed_r + h - 1 do
+            if not occ[rr] then occ[rr] = {} end
+            for cc = placed_c, placed_c + w - 1 do
+                occ[rr][cc] = true
+            end
+        end
+        if placed_r + h - 1 > row_end then
+            row_end = placed_r + h - 1
+        end
+        cell.span_w = w
+        cell.col_start = placed_c
+        cell.col_end = placed_c + w - 1
+        cell.area = { x = placed_c, y = placed_r, w = w, h = h }
+        if not by_row[placed_r] then
+            by_row[placed_r] = {}
+            row_keys[#row_keys + 1] = placed_r
+        end
+        local bucket = by_row[placed_r]
+        bucket[#bucket + 1] = cell
+    end
+
+    table.sort(row_keys)
+    local grid = {
+        corpse_id = npc_id,
+        max_cols = cols,
+        total_cells = #stacks,
+        row_end = row_end,
+        content_px_h = math.max(25, row_end * 43 + 4),
+        raw_items = raw_items,
+    }
+    for i = 1, #row_keys do
+        local rk = row_keys[i]
+        local bucket = by_row[rk]
+        table.sort(bucket, function(a, b) return a.col_start < b.col_start end)
+        local row_tbl = { row_idx = i, grid_y = rk, grid_h = 1 }
+        for c = 1, #bucket do
+            row_tbl[c] = bucket[c]
+            if bucket[c].grid_h > row_tbl.grid_h then
+                row_tbl.grid_h = bucket[c].grid_h
+            end
+        end
+        grid[i] = row_tbl
+    end
+    return grid
+end
+
+-- @z_func: HCL_IUI.hcl_spairs_cmp [internal:Item UI Overlay and Stacking Policy] | bind:hcl_patch_iui_overlays_and_stacking
+local function hcl_spairs_cmp(t, a, b)
+    return compare_items(t[a], t[b])
+end
+
+-- @z_func: HCL_IUI.return_hcl_spairs_cmp [internal:Item UI Overlay and Stacking Policy] | bind:hcl_patch_iui_overlays_and_stacking
+local function return_hcl_spairs_cmp()
+    return hcl_spairs_cmp
+end
+
+-- @z_func: HCL_IUI.hcl_cc_find_similar [internal:Item UI Overlay and Stacking Policy] | bind:hcl_patch_iui_overlays_and_stacking
+local function hcl_cc_find_similar(self_cc, obj, sec)
+    if not obj or self_cc.disable_stack then
+        return false
+    end
+    sec = sec or obj:section()
+    -- Fast O(1) exit via self_cc.indx_sec when no cell of this section exists yet.
+    local known_idx = self_cc.indx_sec and self_cc.indx_sec[sec] or nil
+    if not known_idx then
+        return false
+    end
+    local fast_ci = self_cc.cell[known_idx]
+    if fast_ci and fast_ci.ID and fast_ci.section == sec then
+        local fast_obj = (cc_reinit_items_map and cc_reinit_items_map[fast_ci.ID]) or level.object_by_id(fast_ci.ID)
+        if fast_obj and can_stack_items(fast_obj, obj, cc_reinit_npc_id) then
+            return fast_ci
+        end
+    end
+    for idx = 1, (self_cc.idxer or 0) do
+        if idx ~= known_idx then
+            local ci = self_cc.cell[idx]
+            if ci and ci.ID and ci.section == sec then
+                local ci_obj = (cc_reinit_items_map and cc_reinit_items_map[ci.ID]) or level.object_by_id(ci.ID)
+                if ci_obj and can_stack_items(ci_obj, obj, cc_reinit_npc_id) then
+                    return ci
+                end
+            end
+        end
+    end
+    return false
+end
+
+-- @z_func: HCL_IUI.hcl_cc_find_free_cell [internal:Item UI Overlay and Stacking Policy] | bind:hcl_patch_iui_overlays_and_stacking
+local function hcl_cc_find_free_cell(self_cc, obj, sec)
+    if not sec then
+        if not obj then return false end
+        sec = obj:section()
+    end
+    self_cc.cols = cc_reinit_cols
+    local gw, gh = get_effective_grid_wh(sec)
+    local w = math.min(gw, self_cc.cols)
+    local cat_rank = get_item_category_rank(obj, sec)
+    if self_cc.rKind.last ~= cat_rank then
+        self_cc.rKind.last = cat_rank
+        self_cc.rKind.row = self_cc.row_end + 1
+    end
+    local row_s = self_cc.rKind.row
+    local rows = #self_cc.grid
+    local max_c = self_cc.cols + 1 - w
+    for r = row_s, rows do
+        for c = 1, max_c do
+            if self_cc:IsFreeRoom(r, c, w, gh) then
+                return self_cc:TakeRoom(r, c, w, gh)
+            end
+        end
+    end
+    self_cc:Grow()
+    return hcl_cc_find_free_cell(self_cc, obj, sec)
+end
+
+-- @z_func: HCL_IUI.masked_mcm_get_for_cc [internal:Item UI Overlay and Stacking Policy] | bind:hcl_patch_iui_overlays_and_stacking
+local function masked_mcm_get_for_cc(key)
+    if key == "loot_searching/presort_grid" then
+        return false
+    end
+    return orig_mcm_get_for_cc(key)
+end
+
+-- @z_func: HCL_Patch.has_utjan_overlays [export:output:HCL_IUI] | bind:hcl_patch_iui_overlays_and_stacking
+function has_utjan_overlays()
+    init_iui_runtime()
+    return iui_state.has_utjan == true
+end
+
+-- @z_func: HCL_Patch.configure_cell_container [export:output:HCL_IUI] | bind:hcl_patch_iui_overlays_and_stacking
+function configure_cell_container(cc)
+    if not cc then
+        return
+    end
+    -- Keep sort_method off "kind" so seax_sortingplus_opt_sort_by_kind does not overwrite hcl_spairs_cmp or FindFreeCell during Reinit.
+    cc.sort_method = "hcl_custom"
+    cc.GetDeferredEnabled = return_false_fn
+    cc.deferred = false
+    cc.can_select = false
+    cc.disable_drag = true
+    cc.disable_highlight = true
+    cc.disable_info = true
+    cc.disable_scroll_dragdrop = true
+    cc.GetSortMethod = return_hcl_spairs_cmp
+    cc.FindSimilar = hcl_cc_find_similar
+    cc.FindFreeCell = hcl_cc_find_free_cell
+    cc.original_FindFreeCell = hcl_cc_find_free_cell
+    if cc.drag_up then cc.drag_up:Show(false) end
+    if cc.drag_down then cc.drag_down:Show(false) end
+    if cc.deferredIcon then cc.deferredIcon:Show(false) end
+end
+
+-- @z_func: HCL_Patch.populate_cell_container [export:output:HCL_IUI] | bind:hcl_patch_iui_overlays_and_stacking
+function populate_cell_container(cc, raw_items, npc_id, cols)
+    if not cc then
+        return
+    end
+    init_iui_runtime()
+    configure_cell_container(cc)
+    cc_reinit_npc_id = npc_id
+    cc_reinit_cols = math.max(1, tonumber(cols) or 6)
+    cc.cols = cc_reinit_cols
+
+    local show_cond = hcl_mcm ~= nil and hcl_mcm.get_config("hcl_mcm_cond") == true
+    local show_parts = hcl_mcm ~= nil and hcl_mcm.get_config("hcl_mcm_parts_cond") == true
+    local show_rep = hcl_mcm ~= nil and hcl_mcm.get_config("hcl_mcm_parts_repair_type") == true
+    local show_patch = hcl_mcm ~= nil and hcl_mcm.get_config("hcl_mcm_patches_on_armor") == true
+
+    cc.disable_bar = not show_cond
+    for _, ci in pairs(cc.cell or {}) do
+        if ci then
+            ci.disable_bar = not show_cond
+            ci.disable_bar_og = not show_cond
+        end
+    end
+
+    local items_map = {}
+    if raw_items then
+        for i = 1, #raw_items do
+            local it = raw_items[i]
+            if it then
+                items_map[it:id()] = it
+            end
+        end
+    end
+    cc_reinit_items_map = items_map
+
+    -- Temporarily mask LTTR presort_grid, Utjan settings, and RISK loot-mode gate around synchronous Reinit.
+    local utj_s = (_G.z_item_icon_info and type(_G.z_item_icon_info.settings) == "table") and _G.z_item_icon_info.settings or nil
+    local sv_cond_en, sv_pd_en, sv_pd_wpn, sv_pd_arm, sv_gun_rep, sv_arm_rep, sv_arm_patch
+    if utj_s then
+        if type(utj_s.cond_text) == "table" then
+            sv_cond_en = utj_s.cond_text.enable
+            utj_s.cond_text.enable = show_cond
+        end
+        if type(utj_s.part_dots) == "table" then
+            sv_pd_en = utj_s.part_dots.enable
+            sv_pd_wpn = utj_s.part_dots.show_on_wpn
+            sv_pd_arm = utj_s.part_dots.show_on_armor
+            utj_s.part_dots.enable = show_parts
+            if show_parts then
+                utj_s.part_dots.show_on_wpn = true
+                utj_s.part_dots.show_on_armor = true
+            end
+        end
+        if type(utj_s.wpn_info) == "table" then
+            sv_gun_rep = utj_s.wpn_info.show_gun_repair_type
+            utj_s.wpn_info.show_gun_repair_type = show_rep
+        end
+        if type(utj_s.armor_info) == "table" then
+            sv_arm_rep = utj_s.armor_info.show_armor_type
+            sv_arm_patch = utj_s.armor_info.show_patch
+            utj_s.armor_info.show_armor_type = show_rep
+            utj_s.armor_info.show_patch = show_patch
+        end
+    end
+
+    local risk_rt = (_G.risk_enhancement_core and type(_G.risk_enhancement_core.RUNTIME) == "table") and _G.risk_enhancement_core.RUNTIME or nil
+    local sv_risk_loot = risk_rt and risk_rt.active_loot_mode or nil
+    if risk_rt then
+        risk_rt.active_loot_mode = false
+    end
+
+    local has_mcm_hook = (ui_mcm and type(ui_mcm.get) == "function")
+    if has_mcm_hook then
+        orig_mcm_get_for_cc = ui_mcm.get
+        ui_mcm.get = masked_mcm_get_for_cc
+    end
+
+    local ok, err = pcall(cc.Reinit, cc, items_map)
+    cc_reinit_items_map = nil
+
+    if has_mcm_hook and orig_mcm_get_for_cc then
+        ui_mcm.get = orig_mcm_get_for_cc
+        orig_mcm_get_for_cc = nil
+    end
+    if risk_rt then
+        risk_rt.active_loot_mode = sv_risk_loot
+    end
+    if utj_s then
+        if type(utj_s.cond_text) == "table" then utj_s.cond_text.enable = sv_cond_en end
+        if type(utj_s.part_dots) == "table" then
+            utj_s.part_dots.enable = sv_pd_en
+            utj_s.part_dots.show_on_wpn = sv_pd_wpn
+            utj_s.part_dots.show_on_armor = sv_pd_arm
+        end
+        if type(utj_s.wpn_info) == "table" then utj_s.wpn_info.show_gun_repair_type = sv_gun_rep end
+        if type(utj_s.armor_info) == "table" then
+            utj_s.armor_info.show_armor_type = sv_arm_rep
+            utj_s.armor_info.show_patch = sv_arm_patch
+        end
+    end
+    for _, ln in pairs(cc.line or {}) do
+        if type(ln) == "userdata" then
+            ln:Show(false)
+        end
+    end
+    if not ok then
+        z_probe(1, "hcl_patch.populate_cell_container", "UICellContainer:Reinit error: %s", tostring(err))
+    end
+end
+
+local orig_mag_set_data = nil
+local orig_fast_unload_mag = nil
+local orig_create_ammo = nil
+local orig_alife_create_item = nil
+local orig_create_time_event = nil
+local orig_ial_collect_items = nil
+local orig_ial_handle_disassemble = nil
+local orig_uicellitem_set = nil
+
+-- @z_func: HCL_AMR.amr_agg_actor_cb [internal:AMR Toggle] | bind:hcl_patch_amr_remote_unload
+local function amr_agg_actor_cb()
+    if db.actor and _G.item_weapon and type(_G.item_weapon.ammo_aggregation_full) == "function" then
+        _G.item_weapon.ammo_aggregation_full(db.actor)
+    end
+    bump_patch_dirty()
+    return true
+end
+
+-- @z_func: HCL_AMR.wrapped_mag_set_data [internal:AMR Toggle] | bind:hcl_patch_amr_remote_unload
+local function wrapped_mag_set_data(id, data)
+    orig_mag_set_data(id, data)
+    -- magazine_binder:update calls set_data every ~200ms on ALL online magazines across the level;
+    -- ignore unchanged round counts and magazines not owned by the currently hovered corpse.
+    local new_cnt = (type(data) == "table" and type(data.loaded) == "table") and #data.loaded or -1
+    local prev_cnt = mag_loaded_cnt_cache[id]
+    mag_loaded_cnt_cache[id] = new_cnt
+    if prev_cnt == new_cnt then
+        return
+    end
+    if not (hcl_main and hcl_main.get_corpse_check_status() == "VALID") then
+        return
+    end
+    local corpse = hcl_main.get_hovered_corpse()
+    if not corpse or not id then
+        return
+    end
+    local mag_obj = level.object_by_id(id)
+    local parent = (mag_obj and mag_obj.parent) and mag_obj:parent() or nil
+    if parent and parent:id() == corpse:id() then
+        bump_patch_dirty()
+    end
+end
+
+-- @z_func: HCL_AMR.wrapped_create_ammo [internal:AMR Toggle] | bind:hcl_patch_amr_remote_unload
+local function wrapped_create_ammo(section, position, lvi, gvi, pid, num)
+    if amr_remote_unload_active and db.actor and pid ~= db.actor:id() then
+        return orig_create_ammo(section, db.actor:position(), db.actor:level_vertex_id(), db.actor:game_vertex_id(), db.actor:id(), num)
+    end
+    return orig_create_ammo(section, position, lvi, gvi, pid, num)
+end
+
+-- @z_func: HCL_AMR.wrapped_fast_unload_mag [internal:AMR Toggle] | bind:hcl_patch_amr_remote_unload
+local function wrapped_fast_unload_mag(magazine)
+    local res = orig_fast_unload_mag(magazine)
+    if amr_remote_unload_active and magazine and CreateTimeEvent then
+        CreateTimeEvent("hcl_amr_agg", "agg_" .. tostring(magazine:id()), 0, amr_agg_actor_cb)
+    end
+    return res
+end
+
+-- @z_func: HCL_WPO.wrapped_alife_create_item [internal:Field Strip] | bind:hcl_patch_wpo_fieldstrip_and_scope_clone
+local function wrapped_alife_create_item(section, obj, t)
+    if wpo_redirect_actor_spawn and db.actor and obj and obj.id and obj:id() ~= db.actor:id() then
+        return orig_alife_create_item(section, db.actor, t)
+    end
+    return orig_alife_create_item(section, obj, t)
+end
+
+-- @z_func: HCL_IAL.wrapped_ial_collect_items [internal:IAL Toggle] | bind:hcl_patch_ial_autolooter
+local function wrapped_ial_collect_items(actor)
+    local raw_tbl = orig_ial_collect_items(actor)
+    if not (actor and ial_target_npc_id and actor:id() == ial_target_npc_id and time_global() <= ial_window_until_tg) then
+        return raw_tbl
+    end
+    if not is_lttr_enabled() then
+        return raw_tbl
+    end
+    local filtered = {}
+    local npc_id = actor:id()
+    for item_id, item_obj in pairs(raw_tbl or {}) do
+        if is_item_revealed(npc_id, item_id) then
+            filtered[item_id] = item_obj
+        end
+    end
+    return filtered
+end
+
+-- @z_func: HCL_IAL.wrapped_ial_handle_disassemble [internal:IAL Toggle] | bind:hcl_patch_ial_autolooter
+local function wrapped_ial_handle_disassemble(actor)
+    local active_ial = (actor and ial_target_npc_id and actor:id() == ial_target_npc_id and time_global() <= ial_window_until_tg)
+    if not active_ial then
+        return orig_ial_handle_disassemble(actor)
+    end
+    local prev_ip_d = _G.item_parts and _G.item_parts.d_flag or nil
+    local prev_dit_d = _G.zzz_dit and _G.zzz_dit.d_flag or nil
+    local prev_dit_b = _G.zzz_dit and _G.zzz_dit.b_flag or nil
+    if _G.item_parts then
+        _G.item_parts.d_flag = true
+    end
+    if _G.zzz_dit then
+        _G.zzz_dit.d_flag = true
+        _G.zzz_dit.b_flag = true
+    end
+    local ok, res = pcall(orig_ial_handle_disassemble, actor)
+    if _G.item_parts then
+        _G.item_parts.d_flag = prev_ip_d
+    end
+    if _G.zzz_dit then
+        _G.zzz_dit.d_flag = prev_dit_d
+        _G.zzz_dit.b_flag = prev_dit_b
+    end
+    bump_patch_dirty()
+    if not ok then
+        z_probe(1, "hcl_patch.wrapped_ial_handle_disassemble", "IAL disassemble error: %s", tostring(res))
+    end
+    return res
+end
+
+-- @z_func: HCL_IAL.wrapped_create_time_event [internal:IAL Toggle] | bind:hcl_patch_ial_autolooter
+local function wrapped_create_time_event(ev_id, act_id, timer, f, ...)
+    if ial_target_npc_id and time_global() <= ial_window_until_tg and db.actor and type(ev_id) == "string" and string.find(ev_id, "^delay_disassembly") then
+        local a1, a2, a3, a4, a5 = ...
+        if a1 == ial_target_npc_id then
+            a1 = db.actor:id()
+            return orig_create_time_event(ev_id, act_id, timer, f, a1, a2, a3, a4, a5)
+        end
+    end
+    return orig_create_time_event(ev_id, act_id, timer, f, ...)
+end
+
+-- @z_func: HCL_IUI.wrapped_uicellitem_set [internal:Item UI Overlay and Stacking Policy] | bind:hcl_patch_iui_overlays_and_stacking
+local function wrapped_uicellitem_set(self_cell, obj, area)
+    if area == nil and self_cell and self_cell.ID ~= nil and type(self_cell.area) == "table" then
+        area = self_cell.area
+    end
+    return orig_uicellitem_set(self_cell, obj, area)
+end
+
+-- @z_func: HCL_Patch.ensure_patch_hooks [internal:shared]
+local function ensure_patch_hooks()
+    if hooks_installed then
+        return
+    end
+    hooks_installed = true
+    init_iui_runtime()
+    if _G.magazine_binder and type(_G.magazine_binder.set_data) == "function" then
+        orig_mag_set_data = _G.magazine_binder.set_data
+        _G.magazine_binder.set_data = wrapped_mag_set_data
+    end
+    if _G.magazines and type(_G.magazines.fast_unload_magazine) == "function" then
+        orig_fast_unload_mag = _G.magazines.fast_unload_magazine
+        _G.magazines.fast_unload_magazine = wrapped_fast_unload_mag
+    end
+    if type(_G.create_ammo) == "function" then
+        orig_create_ammo = _G.create_ammo
+        _G.create_ammo = wrapped_create_ammo
+    end
+    if type(_G.alife_create_item) == "function" then
+        orig_alife_create_item = _G.alife_create_item
+        _G.alife_create_item = wrapped_alife_create_item
+    end
+    if type(_G.CreateTimeEvent) == "function" then
+        orig_create_time_event = _G.CreateTimeEvent
+        _G.CreateTimeEvent = wrapped_create_time_event
+    end
+    if _G.z_auto_looter then
+        if type(_G.z_auto_looter.collect_items) == "function" then
+            orig_ial_collect_items = _G.z_auto_looter.collect_items
+            _G.z_auto_looter.collect_items = wrapped_ial_collect_items
+        end
+        if type(_G.z_auto_looter.handle_disassemble) == "function" then
+            orig_ial_handle_disassemble = _G.z_auto_looter.handle_disassemble
+            _G.z_auto_looter.handle_disassemble = wrapped_ial_handle_disassemble
+        end
+    end
+    if _G.zzzz_loot_searching and type(_G.zzzz_loot_searching.is_item_hidden) == "function" then
+        orig_lttr_is_item_hidden = _G.zzzz_loot_searching.is_item_hidden
+    end
+    if _G.utils_ui and _G.utils_ui.UICellItem and type(_G.utils_ui.UICellItem.Set) == "function" then
+        orig_uicellitem_set = _G.utils_ui.UICellItem.Set
+        _G.utils_ui.UICellItem.Set = wrapped_uicellitem_set
+    end
+end
+
+-- @z_func: HCL_Patch.post_mcm_sync_cb [internal:shared] | bind:hcl_patch_global_and_spm
+local function post_mcm_sync_cb()
+    spm_cache_ready = false
+    lttr_cfg_ready = false
+    rebuild_spm_cache()
+    rebuild_lttr_cache()
+    bump_patch_dirty()
+    return true
+end
+
+-- @z_func: HCL_Patch.actor_on_first_update [export:callback:HCL_Patch.output] | bind:hcl_patch_global_and_spm
+function actor_on_first_update()
+    ensure_patch_hooks()
+    rebuild_spm_cache()
+    rebuild_lttr_cache()
+end
+
+-- @z_func: HCL_Patch.on_option_change [export:callback:HCL_Patch.output] | bind:hcl_patch_global_and_spm
+function on_option_change()
+    spm_cache_ready = false
+    lttr_cfg_ready = false
+    rebuild_spm_cache()
+    rebuild_lttr_cache()
+    bump_patch_dirty()
+    -- Re-sync on next tick so zzz_rax_sortingplus_mcm and zzzz_loot_searching finish their own alphabetical on_option_change first.
+    if CreateTimeEvent then
+        CreateTimeEvent("hcl_patch_opt", "sync", 0, post_mcm_sync_cb)
+    end
+end
+
+-- @z_func: HCL_Patch.actor_on_update [export:callback:HCL_Patch.output] | bind:hcl_patch_lc_dual_claim_ledger
+function actor_on_update()
+    if not hooks_installed then
+        ensure_patch_hooks()
+    end
+    local corpse_status = (hcl_main and hcl_main.get_corpse_check_status()) or "INVALID"
+    local cb_status = (hcl_main and hcl_main.get_callback_status()) or "IDLE"
+    local corpse = (corpse_status == "VALID" and hcl_main) and hcl_main.get_hovered_corpse() or nil
+
+    if corpse_status ~= "VALID" or not corpse then
+        enter_lc_idle()
+        interrupt_unload()
+        stop_search()
+        sync_fra_body_search(nil, "INVALID", "IDLE")
+        return
+    end
+
+    local cid = corpse:id()
+    local tg = time_global()
+    if lc_last_corpse_id ~= cid or tg >= lc_next_eval_tg then
+        lc_last_corpse_id = cid
+        lc_next_eval_tg = tg + 100
+        if evaluate_corpse_claim_ledgers(corpse) then
+            enter_lc_claimed()
+        else
+            enter_lc_unclaimed()
+        end
+    end
+
+    if cb_status ~= "LOOT" or is_claimed() or (amr_unloading_corpse_id ~= nil and amr_unloading_corpse_id ~= cid) then
+        interrupt_unload()
+    end
+
+    if (cb_status == "PREVIEW" or cb_status == "LOOT") and (not is_claimed()) then
+        sync_corpse_search(corpse)
+    else
+        stop_search()
+    end
+
+    sync_fra_body_search(corpse, corpse_status, cb_status)
+end
+
+-- @z_func: HCL_Patch.on_game_start [export:callback:HCL_Patch.output] | bind:hcl_patch_global_and_spm
+function on_game_start()
+    RegisterScriptCallback("actor_on_first_update", actor_on_first_update)
+    RegisterScriptCallback("on_option_change", on_option_change)
+    RegisterScriptCallback("actor_on_update", actor_on_update)
+end

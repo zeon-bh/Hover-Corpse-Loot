@@ -1,73 +1,69 @@
 -- [SYSTEM] HCL_UI
 
--- @z [HCL_UI] data:HCL_UI.data
-local ui_metrics = {
-    hcl_ui_main_y = 100,
+-- @z [HCL_UI] data:Hover Corpse Loot UI | bind:hcl_ui_cui_rounded_hud_and_grid
+local ui_config = {
+    hcl_ui_main_y_min = 150,
     hcl_ui_main_y_max = 625,
     header_h = 50,
     footer_h = 25,
-    min_body_h = 50,
+    rounding = 5.0,
+    cell_grid_size = 41,
+    cell_grid_line = 2,
+    swipe_duration_ms = 180,
 }
 
--- @z [HCL_UI] data:Hover Corpse Loot UI | bind:hcl_hud_dialog_and_layout
-local hud_ui = {
-    name = "hcl_ui_main",
-    dialog = nil,
-    is_shown = false,
-    active_state = "HIDDEN",
-    active_corpse_id = nil,
-    last_inv_hash = nil,
-    content_h = 50,
-    body_h = 50,
-    scroll_pos = 0,
-    ui_cell_rows = {},
-    has_hidden_ltt = false,
-    cur_lerp = {
-        initialized = false,
-        x = 0,
-        y = 0,
-        w = 41,
-        h = 41,
-    },
-    last_frame_tg = 0,
+local FACTION_COLORS = {
+    stalker = { 240, 205, 55 },
+    bandit = { 190, 195, 205 },
+    csky = { 65, 210, 235 },
+    dolg = { 235, 50, 50 },
+    freedom = { 65, 225, 80 },
+    army = { 195, 150, 95 },
+    ecolog = { 100, 185, 245 },
+    killer = { 55, 115, 235 },
+    monolith = { 92, 64, 51 },
+    greh = { 155, 20, 25 },
+    isg = { 135, 35, 65 },
+    renegade = { 45, 125, 55 },
+    trader = { 142, 91, 200 },
+    zombied = { 44, 62, 80 },
 }
 
-local ui_runtime = {
-    area_hook_installed = false,
-    ltt_active_npc_id = nil,
-    ltt_xml = nil,
-    ltt_xml_checked = false,
-    valid_ind_styles = {},
-    last_ind_tex = nil,
-    ltt_snd_tmr = 0,
-    ltt_dots = 0,
-    ltt_dots_tmr = 0,
-    ltt_cached_text = nil,
-    ltt_cached_fac = nil,
+local PATCH_COMMUNITIES = {
+    stalker = true,
+    bandit = true,
+    csky = true,
+    dolg = true,
+    freedom = true,
+    army = true,
+    ecolog = true,
+    killer = true,
+    monolith = true,
+    greh = true,
+    isg = true,
+    renegade = true,
+    zombied = true,
 }
 
 local CURSOR_COLORS = {
-    Amber = { 255, 185, 40 },
-    Cyan = { 55, 215, 255 },
-    White = { 240, 240, 245 },
-    Green = { 75, 240, 100 },
+    Gold = { 255, 205, 55 },
+    Cyan = { 65, 225, 245 },
+    White = { 245, 245, 245 },
+    Green = { 75, 235, 95 },
+    Blue = { 75, 145, 255 },
 }
 
-local FACTION_PATCH_MAP = {
-    stalker = "stalker_patch",
-    bandit = "bandit_patch",
-    csky = "csky_patch",
-    dolg = "dolg_patch",
-    freedom = "freedom_patch",
-    killer = "killer_patch",
-    army = "army_patch",
-    military = "army_patch",
-    ecolog = "ecolog_patch",
-    monolith = "monolith_patch",
-    greh = "greh_patch",
-    renegade = "renegade_patch",
-    isg = "isg_patch",
+local RIM_OFFSETS = {
+    { -1, -1 }, { 0, -1 }, { 1, -1 },
+    { -1, 0 },             { 1, 0 },
+    { -1, 1 },  { 0, 1 },  { 1, 1 },
 }
+
+local gui = nil
+local ui_state = "HIDDEN"
+local gui_attached = false
+local mcm_ui_dirty = true
+local last_frame_tg = 0
 
 -- @z_func: HCL_UI.z_probe [internal:shared]
 local function z_probe(level, func_name, fmt, ...)
@@ -76,1287 +72,1567 @@ local function z_probe(level, func_name, fmt, ...)
     end
 end
 
-class "UIHoverCorpseLoot" (CUIScriptWnd)
+-- @z_func: HCL_UI.noop_owner_show [internal:Hover Corpse Loot UI] | bind:hcl_ui_cui_rounded_hud_and_grid
+local function noop_owner_show()
+end
 
--- @z_func: HCL_UI.__init [internal:Hover Corpse Loot UI] | bind:hcl_hud_dialog_and_layout
-function UIHoverCorpseLoot:__init() super()
-    local xml = CScriptXmlInit()
-    xml:ParseFile("ui_hcl.xml")
-    self.xml = xml
-    self.sort_method = "sizekind"
+-- @z_func: HCL_UI.get_screen_ratio [internal:shared] | bind:hcl_ui_cui_rounded_hud_and_grid
+local function get_screen_ratio()
+    if _G.utils_xml and _G.utils_xml.screen_ratio then
+        local r = tonumber(_G.utils_xml.screen_ratio())
+        if r and r > 0 then
+            return r
+        end
+    end
+    return 0.75
+end
 
-    self.frame = xml:InitStatic("frame", self)
-    self.frame:SetStretchTexture(true)
+-- @z_func: HCL_UI.get_tactical_font_large [internal:Hover Corpse Loot UI] | bind:hcl_ui_cui_rounded_hud_and_grid
+local function get_tactical_font_large()
+    if type(_G.GetFontLetterica18Russian) == "function" then
+        return _G.GetFontLetterica18Russian()
+    end
+    return _G.GetFontMedium and _G.GetFontMedium() or nil
+end
 
-    self.header = xml:InitStatic("header", self.frame)
-    self.faction_patch = xml:InitStatic("faction_patch", self.header)
-    self.stalker_name = xml:InitTextWnd("stalker_name", self.header)
-    self.stalker_rank = xml:InitTextWnd("stalker_rank", self.header)
-    self.looted_tag = xml:InitTextWnd("looted_tag", self.header)
-    self.header_sep = xml:InitStatic("header_sep", self.header)
-    self.header_sep:SetStretchTexture(true)
+-- @z_func: HCL_UI.get_tactical_font_regular [internal:Hover Corpse Loot UI] | bind:hcl_ui_cui_rounded_hud_and_grid
+local function get_tactical_font_regular()
+    if type(_G.GetFontLetterica16Russian) == "function" then
+        return _G.GetFontLetterica16Russian()
+    end
+    return _G.GetFontSmall and _G.GetFontSmall() or nil
+end
 
-    -- Attach cursor BEFORE loot_container so selection background renders behind item icons
-    self.cursor = xml:InitStatic("cursor", self.frame)
-    self.cursor:SetStretchTexture(true)
-    self.cursor:Show(false)
-
-    self.loot_container = xml:InitStatic("loot_container", self.frame)
-    self.scrollbar_track = xml:InitStatic("scrollbar_track", self.loot_container)
-    self.scrollbar_track:SetStretchTexture(true)
-    self.scrollbar_track:Show(false)
-    self.scrollbar_thumb = xml:InitStatic("scrollbar_thumb", self.loot_container)
-    self.scrollbar_thumb:SetStretchTexture(true)
-    self.scrollbar_thumb:Show(false)
-
-    self.status_text = xml:InitTextWnd("status_text", self.frame)
-    self.status_text:SetTextAlignment(2)
-    self.status_text:Show(false)
-
-    self.footer = xml:InitStatic("footer", self.frame)
-    self.footer_sep = xml:InitStatic("footer_sep", self.footer)
-    self.footer_sep:SetStretchTexture(true)
-    self.footer_text = xml:InitTextWnd("footer_text", self.footer)
-    self.footer_text:SetTextAlignment(2)
-    self.footer_ltt_text = xml:InitTextWnd("footer_text", self.footer)
-    self.footer_ltt_text:SetTextAlignment(2)
-    self.footer_ltt_text:Show(false)
-    self.footer_ltt_icon = xml:InitStatic("footer_ltt_icon", self.footer)
-    self.footer_ltt_icon:SetStretchTexture(true)
-    self.footer_ltt_icon:Show(false)
-
-    self.cc = utils_ui.UICellContainer("hcl_loot_bag", self, nil, "hcl_loot_window", self.loot_container)
-    self.cc.can_select = false
-    self.cc.showcase = false
-    -- Keep disable_bar false so Utjan InitControls does not latch disable_bar_og=true on pooled cells
-    self.cc.disable_bar = false
-    self.cc.GetDeferredEnabled = function()
+-- @z_func: HCL_UI.init_tex_safe [internal:shared] | bind:hcl_ui_cui_rounded_hud_and_grid
+local function init_tex_safe(st, tex_name)
+    if not (st and tex_name and tex_name ~= "") then
         return false
     end
-end
-
--- @z_func: HCL_UI.__finalize [internal:Hover Corpse Loot UI]
-function UIHoverCorpseLoot:__finalize()
-end
-
--- @z_func: HCL_UI.resolve_ui_fonts [internal:Hover Corpse Loot UI] | bind:hcl_font_profile
-local function resolve_ui_fonts()
-    local f_primary = GetFontLetterica18Russian()
-    local f_sub = GetFontLetterica16Russian()
-    if ui_inventory and ui_inventory.GUI then
-        local gui = ui_inventory.GUI
-        if gui.npc_name and gui.npc_name.GetFont then
-            f_primary = gui.npc_name:GetFont() or f_primary
-        end
-        if gui.player_weight and gui.player_weight.GetFont then
-            f_sub = gui.player_weight:GetFont() or f_sub
-        end
-    end
-    return f_primary, f_sub
-end
-
--- @z_func: HCL_UI.apply_font_profile [internal:Hover Corpse Loot UI] | bind:hcl_font_profile
-local function apply_font_profile(dlg)
-    if not dlg then
-        return
-    end
-    local f18, f16 = resolve_ui_fonts()
-    if f18 then
-        dlg.stalker_name:SetFont(f18)
-        dlg.status_text:SetFont(f18)
-    end
-    if f16 then
-        dlg.stalker_rank:SetFont(f16)
-        dlg.looted_tag:SetFont(f16)
-        dlg.footer_text:SetFont(f16)
-        if dlg.footer_ltt_text then
-            dlg.footer_ltt_text:SetFont(f16)
-        end
-    end
-end
-
--- @z_func: HCL_UI.set_centered_truncated_text [internal:Hover Corpse Loot UI] | bind:hcl_font_profile
-local function set_centered_truncated_text(text_wnd, raw_text, base_w, margin_x, pos_y, sep_w, box_h)
-    local text = tostring(raw_text or "")
-    local ratio = utils_xml.screen_ratio()
-    local max_px_w = sep_w - (8 * ratio)
-    local max_chars = math.max(12, math.floor((base_w - 20) / 6.7))
-    local cut_len = math.min(#text, max_chars)
-    local candidate = text
-    if #text > max_chars then
-        candidate = string.gsub(string.sub(text, 1, cut_len), "%s+$", "") .. "..."
-    end
-    text_wnd:SetText(candidate)
-    text_wnd:AdjustWidthToText()
-    while text_wnd:GetWidth() > max_px_w and cut_len > 4 do
-        local over_ratio = max_px_w / math.max(1, text_wnd:GetWidth())
-        local next_cut = math.floor(cut_len * over_ratio)
-        if next_cut >= cut_len then
-            next_cut = cut_len - 2
-        end
-        cut_len = math.max(4, next_cut)
-        candidate = string.gsub(string.sub(text, 1, cut_len), "%s+$", "") .. "..."
-        text_wnd:SetText(candidate)
-        text_wnd:AdjustWidthToText()
-    end
-    -- Restore fixed pos and width after AdjustWidthToText so SetTextAlignment(2) stays centered
-    text_wnd:SetWndPos(vector2():set(margin_x, pos_y))
-    text_wnd:SetWndSize(vector2():set(sep_w, box_h))
-end
-
--- @z_func: HCL_UI.install_uicellitem_area_hook [internal:Hover Corpse Loot UI] | bind:hcl_sortingplus_grid
-local function install_uicellitem_area_hook()
-    if ui_runtime.area_hook_installed then
-        return
-    end
-    if utils_ui and utils_ui.UICellItem and utils_ui.UICellItem.Set then
-        local orig_set = utils_ui.UICellItem.Set
-        utils_ui.UICellItem.Set = function(self_cell, obj, area)
-            if area == nil and self_cell and self_cell.ID ~= nil and type(self_cell.area) == "table" then
-                area = self_cell.area
-            end
-            return orig_set(self_cell, obj, area)
-        end
-        ui_runtime.area_hook_installed = true
-    end
-end
-
--- @z_func: HCL_UI.ensure_hud_dialog [internal:Hover Corpse Loot UI] | bind:hcl_hud_dialog_and_layout
-local function ensure_hud_dialog()
-    install_uicellitem_area_hook()
-    if not hud_ui.dialog then
-        hud_ui.dialog = UIHoverCorpseLoot()
-        apply_font_profile(hud_ui.dialog)
-    end
-    return hud_ui.dialog
-end
-
--- @z_func: HCL_UI.mount_hud_dialog [internal:Hover Corpse Loot UI] | bind:hcl_hud_dialog_and_layout
-local function mount_hud_dialog()
-    local dlg = ensure_hud_dialog()
-    if not hud_ui.is_shown then
-        local hud = get_hud()
-        if hud then
-            hud:AddDialogToRender(dlg)
-            hud_ui.is_shown = true
-        end
-    end
-    dlg:Show(true)
-end
-
--- @z_func: HCL_UI.unmount_hud_dialog [internal:HIDDEN] | bind:hcl_hud_dialog_and_layout
-local function unmount_hud_dialog()
-    if hud_ui.is_shown and hud_ui.dialog then
-        local hud = get_hud()
-        if hud then
-            hud:RemoveDialogToRender(hud_ui.dialog)
-        end
-        hud_ui.dialog:Show(false)
-        hud_ui.is_shown = false
-    end
-end
-
--- @z_func: HCL_UI.get_ltt_config [internal:Looting Takes Time Visuals] | bind:hcl_looting_takes_time
-local function get_ltt_config(key, default_val)
-    if zzzz_loot_searching_mcm and zzzz_loot_searching_mcm.get_config then
-        local v = zzzz_loot_searching_mcm.get_config(key)
-        if v ~= nil then
-            return v
-        end
-    end
-    return default_val
-end
-
--- @z_func: HCL_UI.update_header_info [internal:Hover Corpse Loot UI] | bind:hcl_hud_dialog_and_layout
-local function update_header_info(dlg, corpse, base_w, cb_status)
-    if not dlg or not corpse then
-        return
-    end
-    local ratio = utils_xml.screen_ratio()
-    local win_w = base_w * ratio
-    local margin_x = 6 * ratio
-
-    local raw_comm = (character_community and character_community(corpse)) or (corpse.character_community and corpse:character_community()) or ""
-    local clean_comm = string.gsub(raw_comm, "^actor_", "")
-
-    local patch_sec = nil
-    if clean_comm ~= "" and clean_comm ~= "trader" and clean_comm ~= "monster" then
-        local candidate = FACTION_PATCH_MAP[clean_comm] or (clean_comm .. "_patch")
-        if ini_sys and ini_sys:section_exist(candidate) then
-            patch_sec = candidate
-        end
-    end
-
-    local text_left_x = margin_x + (2 * ratio)
-    if patch_sec then
-        local tex = utils_xml.get_icons_texture(patch_sec)
-        local axis = utils_xml.get_item_axis(patch_sec)
-        if tex and axis then
-            dlg.faction_patch:InitTexture(tex)
-            dlg.faction_patch:SetTextureRect(Frect():set(axis.x1, axis.y1, axis.x2, axis.y2))
-            -- Strictly size and position AFTER InitTexture/SetTextureRect
-            dlg.faction_patch:SetStretchTexture(true)
-            dlg.faction_patch:SetWndPos(vector2():set(margin_x, 7))
-            dlg.faction_patch:SetWndSize(vector2():set(36 * ratio, 36))
-            dlg.faction_patch:Show(true)
-            text_left_x = margin_x + (42 * ratio)
-        else
-            dlg.faction_patch:Show(false)
-        end
-    else
-        dlg.faction_patch:Show(false)
-    end
-
-    local show_looted = (cb_status == "LOOT") or hcl_main.is_corpse_looted(corpse)
-    local tag_w = 72 * ratio
-    if show_looted then
-        local tag_str = game.translate_string("st_hcl_looted_tag")
-        if not tag_str or tag_str == "" or tag_str == "st_hcl_looted_tag" then
-            tag_str = "[LOOTED]"
-        end
-        dlg.looted_tag:SetText(tag_str)
-        dlg.looted_tag:SetTextColor(GetARGB(255, 75, 255, 95))
-        dlg.looted_tag:SetWndPos(vector2():set(win_w - tag_w - (5 * ratio), 6))
-        dlg.looted_tag:SetWndSize(vector2():set(tag_w, 20))
-        dlg.looted_tag:Show(true)
-    else
-        dlg.looted_tag:Show(false)
-    end
-
-    local c_name = (corpse.character_name and corpse:character_name()) or corpse:name() or ""
-    local header_title = c_name
-
-    local avail_title_w = win_w - text_left_x - (show_looted and (tag_w + 8 * ratio) or margin_x)
-    dlg.stalker_name:SetText(header_title)
-    dlg.stalker_name:AdjustWidthToText()
-    if dlg.stalker_name:GetWidth() > avail_title_w and avail_title_w > 20 then
-        local cut = math.max(6, math.floor(#header_title * (avail_title_w / math.max(1, dlg.stalker_name:GetWidth())) - 2))
-        dlg.stalker_name:SetText(string.gsub(string.sub(header_title, 1, cut), "%s+$", "") .. "...")
-    end
-    dlg.stalker_name:SetWndPos(vector2():set(text_left_x, 6))
-    dlg.stalker_name:SetWndSize(vector2():set(math.max(20, avail_title_w), 22))
-    dlg.stalker_name:SetTextColor(GetARGB(255, 238, 238, 240))
-
-    local raw_fac = (clean_comm ~= "") and game.translate_string(clean_comm) or ""
-    local fac_disp = (raw_fac ~= "" and raw_fac ~= clean_comm) and raw_fac or ""
-    local rank_key = (ranks and ranks.get_obj_rank_name and ranks.get_obj_rank_name(corpse)) or ""
-    local raw_rank = (rank_key ~= "") and game.translate_string("st_rank_" .. rank_key) or ""
-    local rank_disp = (raw_rank ~= "" and raw_rank ~= ("st_rank_" .. rank_key)) and raw_rank or ""
-
-    local subtext = ""
-    if fac_disp ~= "" and rank_disp ~= "" then
-        subtext = fac_disp .. " - " .. rank_disp
-    elseif fac_disp ~= "" then
-        subtext = fac_disp
-    else
-        subtext = rank_disp
-    end
-
-    local avail_sub_w = win_w - text_left_x - margin_x
-    dlg.stalker_rank:SetText(subtext)
-    dlg.stalker_rank:AdjustWidthToText()
-    if dlg.stalker_rank:GetWidth() > avail_sub_w and avail_sub_w > 20 then
-        local cut = math.max(6, math.floor(#subtext * (avail_sub_w / math.max(1, dlg.stalker_rank:GetWidth())) - 2))
-        dlg.stalker_rank:SetText(string.gsub(string.sub(subtext, 1, cut), "%s+$", "") .. "...")
-    end
-    dlg.stalker_rank:SetWndPos(vector2():set(text_left_x, 27))
-    dlg.stalker_rank:SetWndSize(vector2():set(math.max(20, avail_sub_w), 18))
-    dlg.stalker_rank:SetTextColor(GetARGB(220, 168, 174, 180))
-end
-
--- @z_func: HCL_UI.scan_corpse_inventory [internal:Hover Corpse Loot UI] | bind:hcl_looting_takes_time
-local function scan_corpse_inventory(corpse, ltt_vis)
-    local items = {}
-    local raw_count = 0
-    local hidden_count = 0
-    local max_item_w = 1
-    local hash_parts = {}
-    local npc_id = corpse:id()
-    local ltt_active = (_G.zzzz_loot_searching and zzzz_loot_searching.is_item_hidden) and true or false
-    local placeholder_mode = ltt_active and (tonumber(get_ltt_config("placeholder_mode", 2)) or 2) or 1
-    local has_vis_map = (type(ltt_vis) == "table")
-
-    corpse:iterate_inventory(function(owner, item)
-        if item then
-            local id = item:id()
-            local sec = item:section()
-            local gw = SYS_GetParam(2, sec, "inv_grid_width") or 0
-            if sec ~= "bolt" and sec ~= "device_pda" and not IsItem("anim", sec) and gw > 0 and not hcl_loot.is_item_blacklisted(id) then
-                raw_count = raw_count + 1
-                local is_hidden = ltt_active and zzzz_loot_searching.is_item_hidden(npc_id, id) or false
-                if is_hidden then
-                    hidden_count = hidden_count + 1
-                end
-                local vis_in_grid = has_vis_map and (ltt_vis[id] ~= nil) or (not (is_hidden and placeholder_mode == 0))
-                if vis_in_grid then
-                    items[id] = item
-                    if gw > max_item_w then
-                        max_item_w = gw
-                    end
-                    local cond_q = math.floor((item:condition() or 1) * 100 + 0.5)
-                    local ammo_q = (item.get_ammo_in_magazine and item:get_ammo_in_magazine()) or (item.ammo_get_count and item:ammo_get_count()) or 0
-                    local mag_q = 0
-                    if magazine_binder and magazine_binder.get_data then
-                        local md = magazine_binder.get_data(id)
-                        mag_q = (md and md.loaded and #md.loaded) or 0
-                    end
-                    hash_parts[#hash_parts + 1] = string.format("%d:%d:%d:%d:%d", id, cond_q, ammo_q, mag_q, is_hidden and 1 or 0)
-                end
-            end
-        end
-    end, corpse)
-
-    table.sort(hash_parts)
-    local cfg_sig = string.format(
-        "|w=%s|c=%s|pc=%s|pr=%s|pa=%s|seq=%d|hid=%d",
-        tostring(hcl_mcm.get_config("hcl_ui_main_x")),
-        tostring(hcl_mcm.get_config("hcl_cond")),
-        tostring(hcl_mcm.get_config("hcl_parts_cond")),
-        tostring(hcl_mcm.get_config("hcl_parts_repair_type")),
-        tostring(hcl_mcm.get_config("hcl_patches_on_armor")),
-        hcl_loot.get_refresh_seq(),
-        hidden_count
-    )
-    return items, raw_count, hidden_count, max_item_w, table.concat(hash_parts, ",") .. cfg_sig
-end
-
--- @z_func: HCL_UI.rebuild_loot_grid [internal:Hover Corpse Loot UI] | bind:hcl_sortingplus_grid
-local function rebuild_loot_grid(dlg, corpse, items, max_item_w, base_w)
-    local cc = dlg.cc
-    local inner_base_w = math.max(160, base_w - 14)
-    local cols = math.max(4, math.floor(inner_base_w / 42))
-    local grid_sz = 41
-    if max_item_w > cols then
-        cols = max_item_w
-        grid_sz = math.max(24, math.floor(inner_base_w / cols) - 1)
-    end
-    cc.cols = cols
-    cc.grid_size = grid_sz
-    cc.disable_bar = false
-    if cc.cell then
-        for _, ci in pairs(cc.cell) do
-            if ci then
-                ci.disable_bar_og = false
-            end
-        end
-    end
-
-    local npcinv = (ui_mcm and ui_mcm.get and ui_mcm.get("SortingPlus/npcinv")) and true or false
-    local sort_m = npcinv and "kind" or "sizekind"
-    dlg.sort_method = sort_m
-    cc.sort_method = sort_m
-
-    local orig_mcm_get = ui_mcm and ui_mcm.get or nil
-    if orig_mcm_get then
-        ui_mcm.get = function(path)
-            if path == "loot_searching/presort_grid" then
-                return false
-            end
-            return orig_mcm_get(path)
-        end
-    end
-
-    local u_set = z_item_icon_info and z_item_icon_info.settings or nil
-    local prev_ct_tbl, prev_pd_tbl, prev_rt_tbl, prev_rt_bool = nil, nil, nil, nil
-    if u_set then
-        local show_ct = hcl_mcm.get_config("hcl_cond") and true or false
-        local show_pd = hcl_mcm.get_config("hcl_parts_cond") and true or false
-        local show_rt = hcl_mcm.get_config("hcl_parts_repair_type") and true or false
-        if type(u_set.cond_text) == "table" then
-            prev_ct_tbl = u_set.cond_text.enable
-            u_set.cond_text.enable = show_ct
-        end
-        if type(u_set.part_dots) == "table" then
-            prev_pd_tbl = u_set.part_dots.enable
-            u_set.part_dots.enable = show_pd
-        end
-        if type(u_set.repair_type) == "table" then
-            prev_rt_tbl = u_set.repair_type.enable
-            u_set.repair_type.enable = show_rt
-        end
-        if u_set.show_gun_repair_type ~= nil then
-            prev_rt_bool = u_set.show_gun_repair_type
-            u_set.show_gun_repair_type = show_rt
-        end
-    end
-
-    cc:Reinit(items)
-
-    if u_set then
-        if type(u_set.cond_text) == "table" and prev_ct_tbl ~= nil then
-            u_set.cond_text.enable = prev_ct_tbl
-        end
-        if type(u_set.part_dots) == "table" and prev_pd_tbl ~= nil then
-            u_set.part_dots.enable = prev_pd_tbl
-        end
-        if type(u_set.repair_type) == "table" and prev_rt_tbl ~= nil then
-            u_set.repair_type.enable = prev_rt_tbl
-        end
-        if prev_rt_bool ~= nil then
-            u_set.show_gun_repair_type = prev_rt_bool
-        end
-    end
-    if orig_mcm_get then
-        ui_mcm.get = orig_mcm_get
-    end
-
-    if cc.line then
-        for _, line_wnd in pairs(cc.line) do
-            if type(line_wnd) == "userdata" and line_wnd.Show then
-                line_wnd:Show(false)
-            end
-        end
-    end
-
-    local hide_armor_patches = not hcl_mcm.get_config("hcl_patches_on_armor")
-    local row_buckets = {}
-    local row_keys = {}
-    local max_bottom_px = 0
-
-    if cc.cell then
-        for _, ci in pairs(cc.cell) do
-            if ci and ci.ID and ci.section and ci.cell and ci.cell:IsShown() then
-                local item_obj = level.object_by_id(ci.ID)
-                if hide_armor_patches and item_obj and IsOutfit(item_obj) then
-                    if ci.rax_dynamic_front_layers then
-                        for layer_wnd, _ in pairs(ci.rax_dynamic_front_layers) do
-                            if type(layer_wnd) == "userdata" and layer_wnd.Show then
-                                layer_wnd:Show(false)
-                            end
-                        end
-                    end
-                    if ci.patch and ci.patch.Show then
-                        ci.patch:Show(false)
-                    end
-                end
-
-                local cpos = ci.cell:GetWndPos()
-                local bottom_y = cpos.y + ci.cell:GetHeight()
-                if bottom_y > max_bottom_px then
-                    max_bottom_px = bottom_y
-                end
-
-                local ay = (ci.area and ci.area.y) or math.max(1, math.floor(cpos.y / math.max(1, grid_sz)) + 1)
-                local ax = (ci.area and ci.area.x) or 1
-                if not row_buckets[ay] then
-                    row_buckets[ay] = {}
-                    row_keys[#row_keys + 1] = ay
-                end
-                local c_ids = {}
-                if ci.childs then
-                    for cid, _ in pairs(ci.childs) do
-                        c_ids[#c_ids + 1] = cid
-                    end
-                end
-                row_buckets[ay][#row_buckets[ay] + 1] = {
-                    ax = ax,
-                    ci = ci,
-                    desc = {
-                        id = ci.ID,
-                        obj = item_obj,
-                        sec = ci.section,
-                        child_ids = c_ids,
-                        area = ci.area and { x = ci.area.x, y = ci.area.y, w = ci.area.w, h = ci.area.h } or { x = ax, y = ay, w = 1, h = 1 },
-                    },
-                }
-            end
-        end
-    end
-
-    table.sort(row_keys)
-    local out_rows = {}
-    local ui_rows = {}
-    for i = 1, #row_keys do
-        local bucket = row_buckets[row_keys[i]]
-        table.sort(bucket, function(a, b)
-            if a.ax ~= b.ax then
-                return a.ax < b.ax
-            end
-            return (a.desc.id or 0) < (b.desc.id or 0)
-        end)
-        local r_desc = {}
-        local r_ci = {}
-        for j = 1, #bucket do
-            r_desc[j] = bucket[j].desc
-            r_ci[j] = bucket[j].ci
-        end
-        out_rows[i] = r_desc
-        ui_rows[i] = r_ci
-    end
-
-    hud_ui.ui_cell_rows = ui_rows
-    hud_ui.content_h = math.max(ui_metrics.min_body_h, max_bottom_px + 8)
-    hcl_loot.sync_grid_rows(out_rows)
-end
-
--- @z_func: HCL_UI.drive_ltt_parse [internal:Looting Takes Time Visuals] | bind:hcl_looting_takes_time
-local function drive_ltt_parse(corpse)
-    if not _G.zzzz_loot_searching or not corpse then
-        return nil
-    end
-    if ui_inventory and not ui_inventory.GUI and ui_inventory.UIInventory then
-        ui_inventory.GUI = ui_inventory.UIInventory()
-    end
-    local gui = ui_inventory and ui_inventory.GUI
-    if not gui or not gui.ParseInventory then
-        return nil
-    end
-    local npc_id = corpse:id()
-    if ui_runtime.ltt_active_npc_id ~= nil and ui_runtime.ltt_active_npc_id ~= npc_id then
-        local pm = gui.mode
-        local pn = gui.npc_id
-        gui.mode = "loot"
-        gui.npc_id = ui_runtime.ltt_active_npc_id
-        SendScriptCallback("GUI_on_hide", "UIInventory")
-        gui.mode = pm
-        gui.npc_id = pn
-    end
-    local prev_mode = gui.mode
-    local prev_npc = gui.npc_id
-    gui.mode = "loot"
-    gui.npc_id = npc_id
-    local ltt_vis = gui:ParseInventory(corpse, true, true, true)
-    gui.mode = prev_mode
-    gui.npc_id = prev_npc
-    ui_runtime.ltt_active_npc_id = npc_id
-    return ltt_vis
-end
-
--- @z_func: HCL_UI.pause_ltt_search [internal:HIDDEN] | bind:hcl_looting_takes_time
-local function pause_ltt_search()
-    if not _G.zzzz_loot_searching or ui_runtime.ltt_active_npc_id == nil then
-        ui_runtime.ltt_active_npc_id = nil
-        return
-    end
-    local gui = ui_inventory and ui_inventory.GUI
-    if gui then
-        local prev_mode = gui.mode
-        local prev_npc = gui.npc_id
-        gui.mode = "loot"
-        gui.npc_id = ui_runtime.ltt_active_npc_id
-        SendScriptCallback("GUI_on_hide", "UIInventory")
-        gui.mode = prev_mode
-        gui.npc_id = prev_npc
-    end
-    ui_runtime.ltt_active_npc_id = nil
-end
-
-local RIM_OFFSETS = {
-    { -1, -1 }, { 0, -1 }, { 1, -1 },
-    { -1,  0 },            { 1,  0 },
-    { -1,  1 }, { 0,  1 }, { 1,  1 },
-}
-
--- @z_func: HCL_UI.get_ltt_xml [internal:Looting Takes Time Visuals] | bind:hcl_looting_takes_time
-local function get_ltt_xml()
-    if ui_runtime.ltt_xml_checked then
-        return ui_runtime.ltt_xml
-    end
-    ui_runtime.ltt_xml_checked = true
-    if _G.zzzz_loot_searching then
-        local ok, x = pcall(function()
-            local xml_inst = CScriptXmlInit()
-            xml_inst:ParseFile("ui_xcvb_looting.xml")
-            return xml_inst
-        end)
-        if ok and x then
-            ui_runtime.ltt_xml = x
-        end
-    end
-    return ui_runtime.ltt_xml
-end
-
--- @z_func: HCL_UI.hide_cell_extra_layers [internal:Looting Takes Time Visuals] | bind:hcl_looting_takes_time
-local function hide_cell_extra_layers(ci)
-    if ci.ico then ci.ico:Show(false) end
-    if ci.shadow then ci.shadow:Show(false) end
-    if ci.bar then ci.bar:Show(false) end
-    if ci.cnt then ci.cnt:Show(false) end
-    if ci.cond_text then ci.cond_text:Show(false) end
-    if ci.cond_text_bg then ci.cond_text_bg:Show(false) end
-    if ci.upgr then ci.upgr:Show(false) end
-    if type(ci.parts_bars) == "table" then
-        for _, pb in pairs(ci.parts_bars) do
-            if type(pb) == "userdata" and pb.Show then
-                pb:Show(false)
-            end
-        end
-    end
-    if ci.rax_dynamic_front_layers then
-        for layer_wnd, _ in pairs(ci.rax_dynamic_front_layers) do
-            if type(layer_wnd) == "userdata" and layer_wnd.Show then
-                layer_wnd:Show(false)
-            end
-        end
-    end
-end
-
--- @z_func: HCL_UI.render_cell_silhouette [internal:Looting Takes Time Visuals] | bind:hcl_looting_takes_time
-local function render_cell_silhouette(ci, ratio)
-    local sec = ci.section
-    if not sec or not ci.cell then
-        return
-    end
-    local tex = utils_xml.get_icons_texture(sec)
-    local axis = utils_xml.get_item_axis(sec)
-    if not tex or not axis then
-        return
-    end
-    if not ci.hcl_sil then
-        local c_xml = ci:GetXML()
-        local pic_path = ci.path .. ":" .. ci.cx .. ":pic"
-        local rims = {}
-        for i = 1, 8 do
-            rims[i] = c_xml:InitStatic(pic_path, ci.cell)
-        end
-        local core = c_xml:InitStatic(pic_path, ci.cell)
-        ci.hcl_sil = { rims = rims, core = core }
-    end
-
-    local cell_w = ci.cell:GetWidth()
-    local cell_h = ci.cell:GetHeight()
-    local cx_px = cell_w * 0.5
-    local cy_px = cell_h * 0.5
-    local g_scale = (ci.grid_size or 41) / 50.0
-    local iw = (axis.w or 50) * g_scale * ratio
-    local ih = (axis.h or 50) * g_scale
-    local rect = Frect():set(axis.x1, axis.y1, axis.x2, axis.y2)
-    local heading = (ci.ico and ci.ico.GetHeading and ci.ico:GetHeading()) or 0
-
-    for i = 1, 8 do
-        local rw = ci.hcl_sil.rims[i]
-        local off = RIM_OFFSETS[i]
-        rw:InitTexture(tex)
-        rw:SetTextureRect(rect)
-        rw:SetStretchTexture(true)
-        if heading > 0 and rw.SetHeading then
-            rw:SetHeading(heading)
-        end
-        rw:SetWndPos(vector2():set(cx_px + (off[1] * ratio), cy_px + off[2]))
-        rw:SetWndSize(vector2():set(iw, ih))
-        rw:SetTextureColor(GetARGB(215, 255, 255, 255))
-        rw:Show(true)
-    end
-
-    local core = ci.hcl_sil.core
-    core:InitTexture(tex)
-    core:SetTextureRect(rect)
-    core:SetStretchTexture(true)
-    if heading > 0 and core.SetHeading then
-        core:SetHeading(heading)
-    end
-    core:SetWndPos(vector2():set(cx_px, cy_px))
-    core:SetWndSize(vector2():set(iw, ih))
-    core:SetTextureColor(GetARGB(255, 0, 0, 0))
-    core:Show(true)
-end
-
--- @z_func: HCL_UI.render_cell_spinner [internal:Looting Takes Time Visuals] | bind:hcl_looting_takes_time
-local function render_cell_spinner(ci, tg, ratio)
-    if not ci.hcl_spinner then
-        local lx = get_ltt_xml()
-        local sp = nil
-        if lx then
-            local ok, node = pcall(function()
-                return lx:InitStatic("cell_spinner", ci.cell)
-            end)
-            if ok and node then
-                sp = node
-            end
-        end
-        if not sp then
-            sp = CUIStatic()
-            ci.cell:AttachChild(sp)
-        end
-        ci.hcl_spinner = sp
-    end
-
-    local sp_style = tostring(get_ltt_config("spinner_style", "default"))
-    local sp_size = math.max(16, math.min(64, tonumber(get_ltt_config("spinner_size", 32)) or 32))
-    local sp_scale_mode = tonumber(get_ltt_config("spinner_scale_mode", 1)) or 1
-    local sp_opacity = math.max(10, math.min(100, tonumber(get_ltt_config("spinner_opacity", 85)) or 85))
-
-    local cell_w = ci.cell:GetWidth()
-    local cell_h = ci.cell:GetHeight()
-    local eff_h = sp_size
-    if sp_scale_mode == 2 then
-        local min_dim = math.min(cell_w / math.max(0.1, ratio), cell_h)
-        eff_h = math.max(16, math.min(64, min_dim * 0.65))
-    end
-    local eff_w = eff_h * ratio
-
-    local frame_idx = math.floor(tg * 26 / 1000) % 13
-    local col = frame_idx % 4
-    local row = math.floor(frame_idx / 4)
-
-    local sp = ci.hcl_spinner
-    sp:InitTexture("ui\\loot_searching\\" .. sp_style .. "\\spinner_atlas")
-    sp:SetTextureRect(Frect():set(col * 128, row * 128, (col + 1) * 128, (row + 1) * 128))
-    sp:SetStretchTexture(true)
-    sp:SetWndPos(vector2():set((cell_w - eff_w) * 0.5, (cell_h - eff_h) * 0.5))
-    sp:SetWndSize(vector2():set(eff_w, eff_h))
-    sp:SetTextureColor(GetARGB(math.floor((sp_opacity / 100.0) * 255 + 0.5), 255, 255, 255))
-    sp:Show(true)
-end
-
--- @z_func: HCL_UI.hide_cell_ltt_widgets [internal:Looting Takes Time Visuals]
-local function hide_cell_ltt_widgets(ci)
-    if ci.hcl_sil then
-        for i = 1, 8 do
-            ci.hcl_sil.rims[i]:Show(false)
-        end
-        ci.hcl_sil.core:Show(false)
-    end
-    if ci.hcl_spinner then
-        ci.hcl_spinner:Show(false)
-    end
-end
-
--- @z_func: HCL_UI.resolve_ltt_indicator_style [internal:Looting Takes Time Visuals] | bind:hcl_looting_takes_time
-local function resolve_ltt_indicator_style()
-    local raw_style = tostring(get_ltt_config("hud_indicator_style", "fading_lines_dimmed"))
-    if raw_style == "" then
-        raw_style = "fading_lines_dimmed"
-    end
-    local cached = ui_runtime.valid_ind_styles[raw_style]
-    if cached ~= nil then
-        return cached
-    end
-    local fs = getFS and getFS() or nil
-    if fs and fs.exist then
-        if fs:exist("$game_data$", "textures\\ui\\loot_indicator\\" .. raw_style .. "\\indicator_atlas.dds") then
-            ui_runtime.valid_ind_styles[raw_style] = raw_style
-            return raw_style
-        elseif fs:exist("$game_data$", "textures\\ui\\loot_indicator\\fading_lines_dimmed\\indicator_atlas.dds") then
-            ui_runtime.valid_ind_styles[raw_style] = "fading_lines_dimmed"
-            return "fading_lines_dimmed"
-        end
-    else
-        ui_runtime.valid_ind_styles[raw_style] = raw_style
-        return raw_style
-    end
-    ui_runtime.valid_ind_styles[raw_style] = "default"
-    return "default"
-end
-
--- @z_func: HCL_UI.resolve_ltt_searching_text [internal:Looting Takes Time Visuals] | bind:hcl_looting_takes_time
-local function resolve_ltt_searching_text(tg)
-    local fac = nil
-    if db.actor then
-        local se_actor = alife_object(db.actor:id())
-        if se_actor and se_actor.community then
-            fac = se_actor:community()
-        end
-    end
-    if not ui_runtime.ltt_cached_text or ui_runtime.ltt_cached_fac ~= fac then
-        ui_runtime.ltt_cached_fac = fac
-        local key = (fac == "bandit" or fac == "renegade") and "st_xcvb_looting_bandit" or "st_xcvb_looting"
-        local tr = game.translate_string(key)
-        if not tr or tr == "" or tr == key then
-            tr = "Searching"
-        end
-        ui_runtime.ltt_cached_text = tr
-    end
-    if tg >= (ui_runtime.ltt_dots_tmr or 0) then
-        ui_runtime.ltt_dots_tmr = tg + 500
-        ui_runtime.ltt_dots = ((ui_runtime.ltt_dots or 0) % 5) + 1
-    end
-    local n_dots = ui_runtime.ltt_dots or 1
-    return ui_runtime.ltt_cached_text .. string.rep(" .", n_dots)
-end
-
--- @z_func: HCL_UI.apply_looting_takes_time_visuals [export:rule:Looting Takes Time Visuals] | bind:hcl_looting_takes_time | states:PREVIEW,LOOTING
-function apply_looting_takes_time_visuals(dlg, corpse, base_w, cb_status)
-    if not dlg or not corpse then
-        return false
-    end
-    local ltt_active = (_G.zzzz_loot_searching and zzzz_loot_searching.is_item_hidden) and true or false
-    if not ltt_active then
-        dlg.footer_ltt_icon:Show(false)
-        if dlg.footer_ltt_text then
-            dlg.footer_ltt_text:Show(false)
-        end
-        if dlg.cc and dlg.cc.cell then
-            for _, ci in pairs(dlg.cc.cell) do
-                if ci then
-                    hide_cell_ltt_widgets(ci)
-                end
-            end
-        end
-        return false
-    end
-
-    local npc_id = corpse:id()
-    local placeholder_mode = tonumber(get_ltt_config("placeholder_mode", 2)) or 2
-    local ratio = utils_xml.screen_ratio()
-    local tg = time_global()
-    local any_hidden = hud_ui.has_hidden_ltt
-
-    if dlg.cc and dlg.cc.cell then
-        for _, ci in pairs(dlg.cc.cell) do
-            if ci and ci.ID and ci.cell and ci.cell:IsShown() then
-                local hidden = zzzz_loot_searching.is_item_hidden(npc_id, ci.ID)
-                if hidden then
-                    any_hidden = true
-                    if placeholder_mode >= 1 then
-                        hide_cell_extra_layers(ci)
-                        render_cell_silhouette(ci, ratio)
-                        if placeholder_mode >= 2 then
-                            render_cell_spinner(ci, tg, ratio)
-                        elseif ci.hcl_spinner then
-                            ci.hcl_spinner:Show(false)
-                        end
-                    end
-                else
-                    hide_cell_ltt_widgets(ci)
-                end
-            end
-        end
-    end
-
-    if any_hidden and get_ltt_config("sound_bg_enable", true) and tg > (ui_runtime.ltt_snd_tmr or 0) and db.actor and sound_object then
-        local snd = sound_object("looting\\looting_" .. tostring(math.random(1, 12)))
-        if snd then
-            local vol_mult = tonumber(get_ltt_config("sound_bg_enable_vol", 1.2)) or 1.2
-            ui_runtime.ltt_snd_tmr = tg + ((snd:length() or 1000) * 0.5)
-            snd:play_at_pos(db.actor, vector():set(0, 0, 0), 0, sound_object.s2d)
-            snd.volume = snd.volume * vol_mult
-        end
-    end
-
-    local cur_params = hcl_loot.get_cursor_params()
-    local sel_obj = (cb_status == "LOOT") and cur_params.cursor_object or nil
-    local sel_revealed = sel_obj and hcl_loot.is_item_lootable(npc_id, sel_obj:id()) or false
-
-    local hud_enable = get_ltt_config("hud_enable", true)
-    if any_hidden and hud_enable then
-        local hud_icon_mode = tonumber(get_ltt_config("hud_icon", 1)) or 1
-        local win_w = base_w * ratio
-        local margin_x = 6 * ratio
-        local sep_w = win_w - (2 * margin_x)
-        if hud_icon_mode == 2 then
-            if dlg.footer_ltt_text then
-                dlg.footer_ltt_text:Show(false)
-            end
-            local eff_style = resolve_ltt_indicator_style()
-            local tex_path = "ui\\loot_indicator\\" .. eff_style .. "\\indicator_atlas"
-            if dlg.last_ind_tex ~= tex_path then
-                dlg.footer_ltt_icon:InitTexture(tex_path)
-                dlg.last_ind_tex = tex_path
-            end
-            -- LTT indicator_atlas_meta: 13 frames at 26 FPS across 4 columns of 256x32 tiles (base 140x21)
-            local frame_idx = math.floor(tg * 26 / 1000) % 13
-            local col = frame_idx % 4
-            local row = math.floor(frame_idx / 4)
-            local scale_pct = math.max(25, math.min(200, tonumber(get_ltt_config("hud_indicator_scale", 70)) or 70))
-            local scale = scale_pct / 100.0
-            local raw_w = 140.0 * scale * ratio
-            local raw_h = 21.0 * scale
-            local max_h = sel_revealed and 16.0 or 19.0
-            local max_w = math.max(40.0, sep_w - (8.0 * ratio))
-            local fit = math.min(1.0, max_h / math.max(1.0, raw_h), max_w / math.max(1.0, raw_w))
-            local iw = raw_w * fit
-            local ih = raw_h * fit
-            local iy = sel_revealed and (22.0 + (18.0 - ih) * 0.5) or (1.0 + (24.0 - ih) * 0.5)
-
-            dlg.footer_ltt_icon:SetTextureRect(Frect():set(col * 256, row * 32, (col + 1) * 256, (row + 1) * 32))
-            dlg.footer_ltt_icon:SetStretchTexture(true)
-            dlg.footer_ltt_icon:SetWndPos(vector2():set((win_w - iw) * 0.5, iy))
-            dlg.footer_ltt_icon:SetWndSize(vector2():set(iw, ih))
-            dlg.footer_ltt_icon:SetTextureColor(GetARGB(255, 255, 255, 255))
-            dlg.footer_ltt_icon:Show(true)
-        else
-            dlg.footer_ltt_icon:Show(false)
-            local ltt_str = resolve_ltt_searching_text(tg)
-            local ty = sel_revealed and 21 or 2
-            local th = sel_revealed and 19 or 22
-            set_centered_truncated_text(dlg.footer_ltt_text, ltt_str, base_w, margin_x, ty, sep_w, th)
-            dlg.footer_ltt_text:SetTextColor(GetARGB(215, 200, 205, 210))
-            dlg.footer_ltt_text:Show(true)
-        end
+    local ok = pcall(st.InitTexture, st, tex_name)
+    if ok then
+        st:SetStretchTexture(true)
         return true
-    end
-
-    dlg.footer_ltt_icon:Show(false)
-    if dlg.footer_ltt_text then
-        dlg.footer_ltt_text:Show(false)
     end
     return false
 end
 
--- @z_func: HCL_UI.resolve_cursor_argb [internal:Hover Corpse Loot UI] | bind:hcl_hud_dialog_and_layout
-local function resolve_cursor_argb()
-    local cname = tostring(hcl_mcm.get_config("hcl_bg_scolor") or "Amber")
-    local rgb = CURSOR_COLORS[cname] or CURSOR_COLORS.Amber
-    local bright = math.max(1, math.min(100, tonumber(hcl_mcm.get_config("hcl_bg_scolor_brightness")) or 75))
-    local b_norm = bright / 100.0
-    local a = math.floor(40 + (b_norm * 165) + 0.5)
-    local scale = 0.45 + (0.55 * b_norm)
-    local r = math.min(255, math.floor(rgb[1] * scale + 0.5))
-    local g = math.min(255, math.floor(rgb[2] * scale + 0.5))
-    local b = math.min(255, math.floor(rgb[3] * scale + 0.5))
-    return GetARGB(a, r, g, b)
+-- @z_func: HCL_UI.create_atlas_static [internal:Hover Corpse Loot UI] | bind:hcl_ui_cui_rounded_hud_and_grid
+local function create_atlas_static(parent, descr_id)
+    local st = CUIStatic()
+    st:SetAutoDelete(false)
+    st:InitTexture(descr_id)
+    st:SetStretchTexture(true)
+    parent:AttachChild(st)
+    return st
 end
 
--- @z_func: HCL_UI.update_window_geometry_and_scroll [internal:Hover Corpse Loot UI] | bind:hcl_hud_dialog_and_layout
-local function update_window_geometry_and_scroll(dlg, base_w, target_body_h, is_grid_mode, eff_footer_h)
-    local ratio = utils_xml.screen_ratio()
-    local win_w = base_w * ratio
-    local margin_x = 6 * ratio
-    local sep_w = win_w - (2 * margin_x)
-    local fh = eff_footer_h or ui_metrics.footer_h
+-- @z_func: HCL_UI.create_raw_static [internal:Hover Corpse Loot UI] | bind:hcl_ui_cui_rounded_hud_and_grid
+local function create_raw_static(parent)
+    local st = CUIStatic()
+    st:SetAutoDelete(false)
+    st:SetStretchTexture(true)
+    parent:AttachChild(st)
+    return st
+end
 
-    local max_body_h = ui_metrics.hcl_ui_main_y_max - ui_metrics.header_h - fh
-    local body_h = math.max(ui_metrics.min_body_h, math.min(max_body_h, target_body_h))
-    local total_h = math.max(100, math.min(ui_metrics.hcl_ui_main_y_max, ui_metrics.header_h + body_h + fh))
-    ui_metrics.hcl_ui_main_y = total_h
-    hud_ui.body_h = body_h
-
-    local x_off = tonumber(hcl_mcm.get_config("hcl_x_offset")) or 150
-    local y_off = tonumber(hcl_mcm.get_config("hcl_y_offset")) or 0
-    local win_x = math.max(4, math.min(1024 - win_w - 4, 512 + (x_off * ratio)))
-    local win_y = math.max(8, math.min(768 - total_h - 8, (384 + y_off) - (total_h * 0.5)))
-
-    local opacity = math.max(10, math.min(100, tonumber(hcl_mcm.get_config("hcl_ui_opacity")) or 75))
-    local bg_alpha = math.floor((opacity / 100.0) * 255 + 0.5)
-    local sep_alpha = math.floor((opacity / 100.0) * 185 + 0.5)
-
-    dlg.frame:SetWndPos(vector2():set(win_x, win_y))
-    dlg.frame:SetWndSize(vector2():set(win_w, total_h))
-    dlg.frame:SetTextureColor(GetARGB(bg_alpha, 0, 0, 0))
-
-    dlg.header:SetWndPos(vector2():set(0, 0))
-    dlg.header:SetWndSize(vector2():set(win_w, ui_metrics.header_h))
-    dlg.header_sep:SetWndPos(vector2():set(margin_x, ui_metrics.header_h - 1))
-    dlg.header_sep:SetWndSize(vector2():set(sep_w, 1))
-    dlg.header_sep:SetTextureColor(GetARGB(sep_alpha, 150, 150, 155))
-
-    dlg.loot_container:SetWndPos(vector2():set(0, ui_metrics.header_h))
-    dlg.loot_container:SetWndSize(vector2():set(win_w, body_h))
-
-    local view_h = math.max(20, body_h - 6)
-    if dlg.cc and dlg.cc.prof then
-        dlg.cc.prof:SetWndPos(vector2():set(margin_x, 4))
-        dlg.cc.prof:SetWndSize(vector2():set(sep_w, view_h))
+-- @z_func: HCL_UI.create_text_wnd [internal:Hover Corpse Loot UI] | bind:hcl_ui_cui_rounded_hud_and_grid
+local function create_text_wnd(xml, parent, fnt)
+    local tw = xml:InitTextWnd("item_info:name", parent)
+    tw:SetAutoDelete(false)
+    tw:SetTextComplexMode(false)
+    if tw.SetEllipsis then
+        tw:SetEllipsis(true)
     end
-    if dlg.cc and dlg.cc.scroll then
-        dlg.cc.scroll:SetWndPos(vector2():set(0, 0))
-        dlg.cc.scroll:SetWndSize(vector2():set(sep_w, view_h))
+    if fnt then
+        tw:SetFont(fnt)
+    end
+    return tw
+end
+
+-- @z_func: HCL_UI.ensure_gui_created [internal:Hover Corpse Loot UI] | bind:hcl_ui_stencil_pill_badges
+local function ensure_gui_created()
+    if gui ~= nil then
+        return gui
+    end
+    local xml = CScriptXmlInit()
+    xml:ParseFile("utils.xml")
+
+    local wnd = CUIScriptWnd()
+    wnd:SetAutoDelete(false)
+    wnd:SetWndPos(vector2():set(512, 309))
+    wnd:SetWndSize(vector2():set(300, 150))
+
+    local bg_tl = create_atlas_static(wnd, "ui_hcl_v2_corner_tl")
+    local bg_tr = create_atlas_static(wnd, "ui_hcl_v2_corner_tr")
+    local bg_top = create_atlas_static(wnd, "ui_hcl_v2_solid")
+    local bg_mid = create_atlas_static(wnd, "ui_hcl_v2_solid")
+    local bg_bl = create_atlas_static(wnd, "ui_hcl_v2_corner_bl")
+    local bg_br = create_atlas_static(wnd, "ui_hcl_v2_corner_br")
+    local bg_bot = create_atlas_static(wnd, "ui_hcl_v2_solid")
+
+    local header_wnd = CUIStatic()
+    header_wnd:SetAutoDelete(false)
+    wnd:AttachChild(header_wnd)
+
+    local hdr_grad_tl = create_atlas_static(header_wnd, "ui_hcl_v2_corner_tl")
+    local hdr_grad_left = create_atlas_static(header_wnd, "ui_hcl_v2_solid")
+    local hdr_grad_main = create_atlas_static(header_wnd, "ui_hcl_v2_header_grad")
+
+    local hdr_grad_tr = create_atlas_static(header_wnd, "ui_hcl_v2_corner_tr")
+    hdr_grad_tr:Show(false)
+    local hdr_grad_right = create_atlas_static(header_wnd, "ui_hcl_v2_solid")
+    hdr_grad_right:Show(false)
+    local hdr_grad_rtl = create_atlas_static(header_wnd, "ui_hcl_v2_hdr_grad_rtl")
+    hdr_grad_rtl:Show(false)
+
+    local header_sep = create_atlas_static(header_wnd, "ui_hcl_v2_sep_fade")
+
+    -- CUIScrollView provides hardware scissor clipping so horizontal LOOTING<->INVENTORY header swipes never bleed outside hcl_ui_main.
+    local header_clip = xml:InitScrollView("container:scroll", header_wnd)
+    header_clip:SetAutoDelete(false)
+    header_clip:SetFixedScrollBar(false)
+    local header_pad = CUIStatic()
+    header_pad:SetAutoDelete(false)
+    header_clip:AddWindow(header_pad, true)
+    header_pad:SetAutoDelete(false)
+    local header_content = CUIStatic()
+    header_content:SetAutoDelete(false)
+    header_pad:AttachChild(header_content)
+
+    local fnt_lg = get_tactical_font_large()
+    local fnt_rg = get_tactical_font_regular()
+    local al_left = (CGameFont and CGameFont.alLeft) or 0
+    local al_center = (CGameFont and CGameFont.alCenter) or 2
+
+    local patch_icon = create_raw_static(header_content)
+    local title_txt = create_text_wnd(xml, header_content, fnt_lg)
+    local rank_txt = create_text_wnd(xml, header_content, fnt_rg)
+    local badge_looted = create_atlas_static(header_content, "ui_hcl_pill_looted")
+    badge_looted:Show(false)
+
+    title_txt:SetTextAlignment(al_left)
+    rank_txt:SetTextAlignment(al_left)
+
+    -- Owner proxy satisfies UICellContainer:InitControls(owner.xml) and Inventory Antifreeze owner.Show patching without mutating C++ userdata.
+    local owner_proxy = {
+        xml = xml,
+        Show = noop_owner_show,
+    }
+    local cc = _G.utils_ui.UICellContainer("npc_bag", owner_proxy, nil, "container:st", wnd)
+    cc.prof:SetAutoDelete(false)
+    cc.scroll:SetAutoDelete(false)
+    cc.st:SetAutoDelete(false)
+    cc:SetGridSpecs(ui_config.cell_grid_size, ui_config.cell_grid_line)
+    cc.scroll:SetFixedScrollBar(false)
+    if hcl_patch and hcl_patch.configure_cell_container then
+        hcl_patch.configure_cell_container(cc)
     end
 
-    dlg.status_text:SetWndPos(vector2():set(margin_x, ui_metrics.header_h))
-    dlg.status_text:SetWndSize(vector2():set(sep_w, body_h))
+    local cursor_fill = create_atlas_static(cc.st, "ui_hcl_v2_solid")
+    cursor_fill:Show(false)
+    local cursor_borders = {}
+    for i = 1, 4 do
+        cursor_borders[i] = create_atlas_static(cc.st, "ui_hcl_v2_solid")
+        cursor_borders[i]:Show(false)
+    end
 
-    dlg.footer:SetWndPos(vector2():set(0, ui_metrics.header_h + body_h))
-    dlg.footer:SetWndSize(vector2():set(win_w, fh))
-    dlg.footer_sep:SetWndPos(vector2():set(margin_x, 0))
-    dlg.footer_sep:SetWndSize(vector2():set(sep_w, 1))
-    dlg.footer_sep:SetTextureColor(GetARGB(sep_alpha, 150, 150, 155))
+    local badge_claimed = create_atlas_static(wnd, "ui_hcl_pill_claimed")
+    badge_claimed:Show(false)
+    local badge_empty = create_atlas_static(wnd, "ui_hcl_pill_empty")
+    badge_empty:Show(false)
 
-    if is_grid_mode and hud_ui.content_h > max_body_h then
-        local max_scroll = math.max(1, hud_ui.content_h - view_h)
-        local cp = hcl_loot.get_cursor_params()
-        local cidx = cp and cp.cursor_idx or nil
-        local sel_ci = cidx and hud_ui.ui_cell_rows[cidx.y] and hud_ui.ui_cell_rows[cidx.y][cidx.x] or nil
-        if sel_ci and sel_ci.cell then
-            local cy = sel_ci.cell:GetWndPos().y
-            local ch = sel_ci.cell:GetHeight()
-            if cy < hud_ui.scroll_pos + 4 then
-                hud_ui.scroll_pos = math.max(0, cy - 4)
-            elseif (cy + ch) > (hud_ui.scroll_pos + view_h - 4) then
-                hud_ui.scroll_pos = math.min(max_scroll, (cy + ch) - view_h + 4)
+    local footer_wnd = CUIStatic()
+    footer_wnd:SetAutoDelete(false)
+    wnd:AttachChild(footer_wnd)
+
+    local footer_sep = create_atlas_static(footer_wnd, "ui_hcl_v2_sep_fade")
+    local footer_txt = create_text_wnd(xml, footer_wnd, fnt_rg)
+    footer_txt:SetTextAlignment(al_center)
+    if footer_txt.SetVTextAlignment then footer_txt:SetVTextAlignment(1) end
+    footer_txt:SetTextColor(GetARGB(240, 230, 232, 235))
+    local footer_ind = create_raw_static(footer_wnd)
+    footer_ind:Show(false)
+
+    gui = {
+        xml = xml,
+        wnd = wnd,
+        owner_proxy = owner_proxy,
+        bg_tl = bg_tl, bg_tr = bg_tr, bg_top = bg_top,
+        bg_mid = bg_mid,
+        bg_bl = bg_bl, bg_br = bg_br, bg_bot = bg_bot,
+        header_wnd = header_wnd,
+        hdr_grad_tl = hdr_grad_tl,
+        hdr_grad_left = hdr_grad_left,
+        hdr_grad_main = hdr_grad_main,
+        hdr_grad_tr = hdr_grad_tr,
+        hdr_grad_right = hdr_grad_right,
+        hdr_grad_rtl = hdr_grad_rtl,
+        header_sep = header_sep,
+        header_clip = header_clip,
+        header_pad = header_pad,
+        header_content = header_content,
+        patch_icon = patch_icon,
+        title_txt = title_txt,
+        rank_txt = rank_txt,
+        badge_looted = badge_looted,
+        cc = cc,
+        badge_claimed = badge_claimed,
+        badge_empty = badge_empty,
+        cursor_fill = cursor_fill,
+        cursor_borders = cursor_borders,
+        footer_wnd = footer_wnd,
+        footer_sep = footer_sep,
+        footer_txt = footer_txt,
+        footer_ind = footer_ind,
+        ci_overlays = {},
+        silhouette_slots = {},
+        last_cc_cap = 0,
+        content_h = 75,
+        viewport_h = 75,
+        overflow = false,
+        cache_frame_key = nil,
+        cache_header_key = nil,
+        cache_grid_key = nil,
+        cache_footer_tex = nil,
+        cache_footer_key = nil,
+        cache_cursor_id = nil,
+        cache_cursor_rect = nil,
+        cache_cursor_clr = nil,
+        cursor_settled = false,
+        cursor_hidden = true,
+        last_scroll_px = -1,
+        last_spinner_pos = nil,
+        last_ind_pos = nil,
+        cur_x = 0, cur_y = 0, cur_w = 0, cur_h = 0,
+        cur_scroll = 0,
+        cursor_ready = false,
+        last_corpse_id = nil,
+        swipe_start_x = 0,
+        swipe_start_tg = 0,
+        swipe_settled = true,
+    }
+    return gui
+end
+
+-- @z_func: HCL_UI.update_window_frame [internal:Hover Corpse Loot UI] | bind:hcl_ui_cui_rounded_hud_and_grid
+local function update_window_frame(g, main_x, desired_vp_h, cols)
+    local ratio = get_screen_ratio()
+    local opacity_pct = (hcl_mcm and tonumber(hcl_mcm.get_config("hcl_mcm_ui_opacity"))) or 75
+    local x_off = (hcl_mcm and tonumber(hcl_mcm.get_config("hcl_mcm_x_offset"))) or 150
+    local y_off = (hcl_mcm and tonumber(hcl_mcm.get_config("hcl_mcm_y_offset"))) or 0
+
+    local max_vp_h = ui_config.hcl_ui_main_y_max - ui_config.header_h - ui_config.footer_h
+    local min_vp_h = ui_config.hcl_ui_main_y_min - ui_config.header_h - ui_config.footer_h
+    local vp_h = math.max(min_vp_h, math.min(max_vp_h, math.floor(desired_vp_h + 0.5)))
+    local total_h = ui_config.header_h + vp_h + ui_config.footer_h
+
+    local win_x = math.max(4, math.min(1020 - main_x, 512 + x_off))
+    local win_y = math.max(4, math.min(764 - total_h, math.floor(384 + y_off - total_h * 0.5 + 0.5)))
+    local eff_cols = cols or ((hcl_patch and hcl_patch.compute_grid_cols and hcl_patch.compute_grid_cols(main_x, ratio)) or 6)
+
+    local frame_key = string.format("%d:%d:%d:%d:%d:%d:%.4f", win_x, win_y, main_x, total_h, opacity_pct, eff_cols, ratio)
+    if g.cache_frame_key == frame_key then
+        return vp_h
+    end
+    g.cache_frame_key = frame_key
+    g.viewport_h = vp_h
+
+    g.wnd:SetWndPos(vector2():set(win_x, win_y))
+    g.wnd:SetWndSize(vector2():set(main_x, total_h))
+
+    local bg_alpha = math.floor(math.max(10, math.min(100, opacity_pct)) * 2.55 + 0.5)
+    local bg_argb = GetARGB(bg_alpha, 0, 0, 0)
+    local r = ui_config.rounding
+    local rx = r * ratio
+    local mid_w = math.max(1, main_x - 2 * rx)
+
+    g.bg_tl:SetWndPos(vector2():set(0, 0))
+    g.bg_tl:SetWndSize(vector2():set(rx, r))
+    g.bg_tr:SetWndPos(vector2():set(main_x - rx, 0))
+    g.bg_tr:SetWndSize(vector2():set(rx, r))
+    g.bg_top:SetWndPos(vector2():set(rx, 0))
+    g.bg_top:SetWndSize(vector2():set(mid_w, r))
+
+    g.bg_mid:SetWndPos(vector2():set(0, r))
+    g.bg_mid:SetWndSize(vector2():set(main_x, math.max(1, total_h - 2 * r)))
+
+    g.bg_bl:SetWndPos(vector2():set(0, total_h - r))
+    g.bg_bl:SetWndSize(vector2():set(rx, r))
+    g.bg_br:SetWndPos(vector2():set(main_x - rx, total_h - r))
+    g.bg_br:SetWndSize(vector2():set(rx, r))
+    g.bg_bot:SetWndPos(vector2():set(rx, total_h - r))
+    g.bg_bot:SetWndSize(vector2():set(mid_w, r))
+
+    g.bg_tl:SetTextureColor(bg_argb)
+    g.bg_tr:SetTextureColor(bg_argb)
+    g.bg_top:SetTextureColor(bg_argb)
+    g.bg_mid:SetTextureColor(bg_argb)
+    g.bg_bl:SetTextureColor(bg_argb)
+    g.bg_br:SetTextureColor(bg_argb)
+    g.bg_bot:SetTextureColor(bg_argb)
+
+    g.header_wnd:SetWndPos(vector2():set(0, 0))
+    g.header_wnd:SetWndSize(vector2():set(main_x, ui_config.header_h))
+    g.header_clip:SetWndPos(vector2():set(0, 0))
+    g.header_clip:SetWndSize(vector2():set(main_x, ui_config.header_h))
+    g.header_pad:SetWndSize(vector2():set(main_x, ui_config.header_h - 1))
+    g.header_content:SetWndSize(vector2():set(main_x, ui_config.header_h - 1))
+    g.header_clip:Clear()
+    g.header_clip:AddWindow(g.header_pad, true)
+    g.header_pad:SetAutoDelete(false)
+
+    local sep_clr = GetARGB(135, 235, 238, 245)
+    g.header_sep:SetWndPos(vector2():set(0, ui_config.header_h - 1))
+    g.header_sep:SetWndSize(vector2():set(main_x, 1))
+    g.header_sep:SetTextureColor(sep_clr)
+
+    local used_grid_w = eff_cols * (ui_config.cell_grid_size * ratio + ui_config.cell_grid_line) + ui_config.cell_grid_line
+    local cc_x = math.max(2, math.floor((main_x - used_grid_w) * 0.5))
+    local cc_w = math.max(used_grid_w, math.min(main_x - cc_x - 2, used_grid_w + 8))
+    g.cc.prof:SetWndPos(vector2():set(cc_x, ui_config.header_h))
+    g.cc.prof:SetWndSize(vector2():set(cc_w, vp_h))
+    g.cc.scroll:SetWndPos(vector2():set(0, 0))
+    g.cc.scroll:SetWndSize(vector2():set(cc_w, vp_h))
+    g.cc.cols = eff_cols
+
+    local cw, ch = 69 * ratio, 20
+    g.badge_claimed:SetWndPos(vector2():set((main_x - cw) * 0.5, ui_config.header_h + (vp_h - ch) * 0.5))
+    g.badge_claimed:SetWndSize(vector2():set(cw, ch))
+
+    local ew, eh = 58 * ratio, 20
+    g.badge_empty:SetWndPos(vector2():set((main_x - ew) * 0.5, ui_config.header_h + (vp_h - eh) * 0.5))
+    g.badge_empty:SetWndSize(vector2():set(ew, eh))
+
+    g.footer_wnd:SetWndPos(vector2():set(0, ui_config.header_h + vp_h))
+    g.footer_wnd:SetWndSize(vector2():set(main_x, ui_config.footer_h))
+    g.footer_sep:SetWndPos(vector2():set(0, 0))
+    g.footer_sep:SetWndSize(vector2():set(main_x, 1))
+    g.footer_sep:SetTextureColor(sep_clr)
+    g.footer_txt:SetWndPos(vector2():set(6, 2))
+    g.footer_txt:SetWndSize(vector2():set(math.max(20, main_x - 12), ui_config.footer_h - 3))
+    return vp_h
+end
+
+-- @z_func: HCL_UI.resolve_community_key [internal:Hover Corpse Loot UI] | bind:hcl_ui_header_identity_and_inventory_swipe | states:CLAIMED,INVENTORY,EMPTY,PREVIEW,LOOTING
+local function resolve_community_key(target_obj, is_player)
+    local raw
+    if is_player then
+        raw = (type(_G.get_actor_true_community) == "function" and _G.get_actor_true_community())
+            or (target_obj and character_community and character_community(target_obj))
+            or "stalker"
+    else
+        raw = (target_obj and character_community and character_community(target_obj)) or "stalker"
+    end
+    raw = string.gsub(tostring(raw), "^actor_", "")
+    if raw == "military" then
+        return "army"
+    end
+    return raw
+end
+
+-- @z_func: HCL_UI.update_header_display [internal:Hover Corpse Loot UI] | bind:hcl_ui_header_identity_and_inventory_swipe | states:CLAIMED,INVENTORY,EMPTY,PREVIEW,LOOTING
+local function update_header_display(g, npc, main_x, is_looted, is_player)
+    local target_obj = is_player and db.actor or npc
+    if not target_obj then
+        return
+    end
+    local ratio = get_screen_ratio()
+    local opacity_pct = (hcl_mcm and tonumber(hcl_mcm.get_config("hcl_mcm_ui_opacity"))) or 75
+    local target_id = target_obj:id()
+    local comm = resolve_community_key(target_obj, is_player)
+    local show_looted = (not is_player) and (is_looted == true)
+    local hdr_key = string.format("%s:%d:%s:%d:%d:%s:%.4f", is_player and "P" or "C", target_id, comm, main_x, opacity_pct, tostring(show_looted), ratio)
+    if g.cache_header_key == hdr_key then
+        return
+    end
+    g.cache_header_key = hdr_key
+
+    local rgb = FACTION_COLORS[comm] or { 125, 130, 138 }
+    local op_scale = math.max(0.2, math.min(1.0, opacity_pct / 100.0))
+    local a0 = math.floor(66 * op_scale + 0.5)
+    local grad_clr = GetARGB(a0, rgb[1], rgb[2], rgb[3])
+    local r = ui_config.rounding
+    local rx = r * ratio
+    local grad_h = ui_config.header_h - 1
+    local al_left = (CGameFont and CGameFont.alLeft) or 0
+    local al_right = (CGameFont and CGameFont.alRight) or 1
+
+    local has_patch = false
+    local pw = 34 * ratio
+    if comm ~= "trader" and PATCH_COMMUNITIES[comm] and _G.utils_xml and _G.utils_xml.get_item_axis then
+        local patch_sec = comm .. "_patch"
+        if ini_sys:section_exist(patch_sec) then
+            local tex = (_G.utils_xml.get_icons_texture and _G.utils_xml.get_icons_texture(patch_sec)) or "ui\\ui_icon_equipment"
+            local axis = _G.utils_xml.get_item_axis(patch_sec)
+            if axis and init_tex_safe(g.patch_icon, tex) then
+                g.patch_icon:SetTextureRect(Frect():set(axis.x1, axis.y1, axis.x2, axis.y2))
+                g.patch_icon:SetWndSize(vector2():set(pw, 34))
+                has_patch = true
             end
         end
-        hud_ui.scroll_pos = math.max(0, math.min(max_scroll, hud_ui.scroll_pos))
-        if dlg.cc and dlg.cc.scroll and dlg.cc.scroll.SetScrollPos then
-            dlg.cc.scroll:SetScrollPos(math.floor(hud_ui.scroll_pos + 0.5))
+    end
+
+    local char_name = (target_obj.character_name and target_obj:character_name()) or target_obj:name()
+    local rank_key = (_G.ranks and _G.ranks.get_obj_rank_name and _G.ranks.get_obj_rank_name(target_obj)) or "novice"
+    local rank_str = game.translate_string("st_rank_" .. tostring(rank_key))
+    if not rank_str or rank_str == ("st_rank_" .. tostring(rank_key)) then
+        rank_str = tostring(rank_key)
+    end
+    g.title_txt:SetTextColor(GetARGB(245, 240, 242, 245))
+    g.title_txt:SetText(tostring(char_name))
+    g.rank_txt:SetTextColor(GetARGB(200, 182, 188, 195))
+    g.rank_txt:SetText(rank_str)
+
+    if is_player then
+        g.hdr_grad_tl:Show(false)
+        g.hdr_grad_left:Show(false)
+        g.hdr_grad_main:Show(false)
+        g.badge_looted:Show(false)
+
+        g.hdr_grad_tr:SetWndPos(vector2():set(main_x - rx, 0))
+        g.hdr_grad_tr:SetWndSize(vector2():set(rx, r))
+        g.hdr_grad_tr:SetTextureColor(grad_clr)
+        g.hdr_grad_tr:Show(true)
+
+        g.hdr_grad_right:SetWndPos(vector2():set(main_x - rx, r))
+        g.hdr_grad_right:SetWndSize(vector2():set(rx, math.max(1, grad_h - r)))
+        g.hdr_grad_right:SetTextureColor(grad_clr)
+        g.hdr_grad_right:Show(true)
+
+        g.hdr_grad_rtl:SetWndPos(vector2():set(0, 0))
+        g.hdr_grad_rtl:SetWndSize(vector2():set(math.max(1, main_x - rx), grad_h))
+        g.hdr_grad_rtl:SetTextureColor(grad_clr)
+        g.hdr_grad_rtl:Show(true)
+
+        local right_pad = 8 * ratio
+        if has_patch then
+            g.patch_icon:SetWndPos(vector2():set(main_x - 7 * ratio - pw, 8))
+            g.patch_icon:Show(true)
+            right_pad = 7 * ratio + pw + 7 * ratio
+        else
+            g.patch_icon:Show(false)
         end
 
-        local sb_x = win_w - (3 * ratio)
-        local sb_w = math.max(1.5, 2 * ratio)
-        local thumb_h = math.max(16, view_h * (view_h / hud_ui.content_h))
-        local thumb_y = 4 + ((view_h - thumb_h) * (hud_ui.scroll_pos / max_scroll))
-        dlg.scrollbar_track:SetWndPos(vector2():set(sb_x, 4))
-        dlg.scrollbar_track:SetWndSize(vector2():set(sb_w, view_h))
-        dlg.scrollbar_track:SetTextureColor(GetARGB(70, 120, 125, 130))
-        dlg.scrollbar_track:Show(true)
-        dlg.scrollbar_thumb:SetWndPos(vector2():set(sb_x, thumb_y))
-        dlg.scrollbar_thumb:SetWndSize(vector2():set(sb_w, thumb_h))
-        dlg.scrollbar_thumb:SetTextureColor(GetARGB(195, 215, 220, 225))
-        dlg.scrollbar_thumb:Show(true)
+        local left_pad = 6 * ratio
+        local tw = math.max(30, main_x - right_pad - left_pad)
+        g.title_txt:SetTextAlignment(al_right)
+        g.rank_txt:SetTextAlignment(al_right)
+        g.title_txt:SetWndPos(vector2():set(left_pad, 7))
+        g.title_txt:SetWndSize(vector2():set(tw, 20))
+        g.rank_txt:SetWndPos(vector2():set(left_pad, 27))
+        g.rank_txt:SetWndSize(vector2():set(tw, 16))
     else
-        hud_ui.scroll_pos = 0
-        if dlg.cc and dlg.cc.scroll and dlg.cc.scroll.SetScrollPos then
-            dlg.cc.scroll:SetScrollPos(0)
+        g.hdr_grad_tr:Show(false)
+        g.hdr_grad_right:Show(false)
+        g.hdr_grad_rtl:Show(false)
+
+        g.hdr_grad_tl:SetWndPos(vector2():set(0, 0))
+        g.hdr_grad_tl:SetWndSize(vector2():set(rx, r))
+        g.hdr_grad_tl:SetTextureColor(grad_clr)
+        g.hdr_grad_tl:Show(true)
+
+        g.hdr_grad_left:SetWndPos(vector2():set(0, r))
+        g.hdr_grad_left:SetWndSize(vector2():set(rx, math.max(1, grad_h - r)))
+        g.hdr_grad_left:SetTextureColor(grad_clr)
+        g.hdr_grad_left:Show(true)
+
+        g.hdr_grad_main:SetWndPos(vector2():set(rx, 0))
+        g.hdr_grad_main:SetWndSize(vector2():set(math.max(1, main_x - rx), grad_h))
+        g.hdr_grad_main:SetTextureColor(grad_clr)
+        g.hdr_grad_main:Show(true)
+
+        local text_x = 8 * ratio
+        if has_patch then
+            g.patch_icon:SetWndPos(vector2():set(7 * ratio, 8))
+            g.patch_icon:Show(true)
+            text_x = 7 * ratio + pw + 7 * ratio
+        else
+            g.patch_icon:Show(false)
         end
-        dlg.scrollbar_track:Show(false)
-        dlg.scrollbar_thumb:Show(false)
+
+        local tag_reserve = 0
+        if show_looted then
+            local pill_w, pill_h = 63 * ratio, 20
+            g.badge_looted:SetWndPos(vector2():set(main_x - pill_w - 5 * ratio, ui_config.header_h - pill_h - 5))
+            g.badge_looted:SetWndSize(vector2():set(pill_w, pill_h))
+            g.badge_looted:Show(true)
+            tag_reserve = pill_w + 8 * ratio
+        else
+            g.badge_looted:Show(false)
+        end
+
+        g.title_txt:SetTextAlignment(al_left)
+        g.rank_txt:SetTextAlignment(al_left)
+        g.title_txt:SetWndPos(vector2():set(text_x, 7))
+        g.title_txt:SetWndSize(vector2():set(math.max(30, main_x - text_x - 6 * ratio), 20))
+        g.rank_txt:SetWndPos(vector2():set(text_x, 27))
+        g.rank_txt:SetWndSize(vector2():set(math.max(30, main_x - text_x - tag_reserve - 6 * ratio), 16))
     end
 end
 
--- @z_func: HCL_UI.update_cursor_and_footer [internal:LOOTING] | bind:hcl_hud_dialog_and_layout
-local function update_cursor_and_footer(dlg, corpse, base_w, cb_status, footer_claimed_by_ltt)
-    local tg = time_global()
-    local dt = math.max(0.001, math.min(0.1, (tg - (hud_ui.last_frame_tg or tg)) / 1000.0))
-    hud_ui.last_frame_tg = tg
+-- @z_func: HCL_UI.start_swipe_transition [internal:INVENTORY] | bind:hcl_ui_header_identity_and_inventory_swipe | states:INVENTORY,LOOTING
+local function start_swipe_transition(g, dir_sign, main_x, tg)
+    g.swipe_start_x = dir_sign * main_x
+    g.swipe_start_tg = tg
+    g.swipe_settled = false
+end
 
-    local ratio = utils_xml.screen_ratio()
-    local margin_x = 6 * ratio
-    local sep_w = (base_w * ratio) - (2 * margin_x)
+-- @z_func: HCL_UI.reset_swipe_offset [internal:HIDDEN] | bind:hcl_ui_header_identity_and_inventory_swipe | states:HIDDEN,CLAIMED,EMPTY,PREVIEW
+local function reset_swipe_offset(g)
+    if not g.swipe_settled then
+        g.swipe_start_x = 0
+        g.swipe_settled = true
+        g.header_content:SetWndPos(vector2():set(0, 0))
+        g.cc.st:SetWndPos(vector2():set(0, 0))
+    end
+end
 
-    if cb_status ~= "LOOT" then
-        dlg.cursor:Show(false)
-        hud_ui.cur_lerp.initialized = false
-        dlg.footer_text:SetText("")
+-- @z_func: HCL_UI.update_swipe_offset [internal:INVENTORY] | bind:hcl_ui_header_identity_and_inventory_swipe | states:INVENTORY,LOOTING
+local function update_swipe_offset(g, tg)
+    if g.swipe_settled then
+        return
+    end
+    local elapsed = math.max(0, tg - g.swipe_start_tg)
+    local t = math.min(1.0, elapsed / ui_config.swipe_duration_ms)
+    local inv_t = 1.0 - t
+    local ease = 1.0 - (inv_t * inv_t * inv_t)
+    local sx = g.swipe_start_x * (1.0 - ease)
+    if t >= 1.0 or math.abs(sx) < 0.25 then
+        sx = 0
+        g.swipe_settled = true
+    end
+    g.header_content:SetWndPos(vector2():set(sx, 0))
+    g.cc.st:SetWndPos(vector2():set(sx, 0))
+end
+
+-- @z_func: HCL_UI.get_or_create_ci_overlay [internal:Hover Corpse Loot UI] | bind:hcl_ui_cui_rounded_hud_and_grid
+local function get_or_create_ci_overlay(g, ci)
+    local idx = ci.indx
+    local existing = g.ci_overlays[idx]
+    if existing and existing.cell_ref == ci.cell then
+        return existing
+    end
+    local cxml = ci:GetXML()
+    local pic_path = tostring(ci.path or "container") .. ":" .. tostring(ci.cx or "cell") .. ":pic"
+    local rim = {}
+    for i = 1, 8 do
+        local r_st = cxml:InitStatic(pic_path, ci.cell)
+        r_st:SetAutoDelete(false)
+        r_st:SetStretchTexture(true)
+        r_st:Show(false)
+        rim[i] = r_st
+    end
+    local core = cxml:InitStatic(pic_path, ci.cell)
+    core:SetAutoDelete(false)
+    core:SetStretchTexture(true)
+    core:Show(false)
+    local spinner = create_raw_static(ci.cell)
+    spinner:Show(false)
+
+    local fnt_rg = get_tactical_font_regular()
+    local al_left = (CGameFont and CGameFont.alLeft) or 0
+    local al_right = (CGameFont and CGameFont.alRight) or 1
+    local fb_dots = {}
+    for i = 1, 6 do
+        fb_dots[i] = create_atlas_static(ci.cell, "ui_hcl_v2_solid")
+        fb_dots[i]:Show(false)
+    end
+    local fb_cond = create_text_wnd(g.xml, ci.cell, fnt_rg)
+    fb_cond:SetTextAlignment(al_left)
+    fb_cond:Show(false)
+    local fb_rep_ic = create_raw_static(ci.cell)
+    fb_rep_ic:Show(false)
+    local fb_rep_txt = create_text_wnd(g.xml, ci.cell, fnt_rg)
+    fb_rep_txt:SetTextAlignment(al_right)
+    fb_rep_txt:Show(false)
+    local fb_patch = create_raw_static(ci.cell)
+    fb_patch:Show(false)
+
+    local ov = {
+        cell_ref = ci.cell,
+        rim = rim,
+        core = core,
+        spinner = spinner,
+        fb_dots = fb_dots,
+        fb_cond = fb_cond,
+        fb_rep_ic = fb_rep_ic,
+        fb_rep_txt = fb_rep_txt,
+        fb_patch = fb_patch,
+    }
+    g.ci_overlays[idx] = ov
+    return ov
+end
+
+-- @z_func: HCL_UI.hide_ci_overlay_widgets [internal:Hover Corpse Loot UI] | bind:hcl_ui_cui_rounded_hud_and_grid
+local function hide_ci_overlay_widgets(ov)
+    if not ov then
+        return
+    end
+    for i = 1, 8 do ov.rim[i]:Show(false) end
+    ov.core:Show(false)
+    ov.spinner:Show(false)
+    for i = 1, 6 do ov.fb_dots[i]:Show(false) end
+    ov.fb_cond:Show(false)
+    ov.fb_rep_ic:Show(false)
+    ov.fb_rep_txt:Show(false)
+    ov.fb_patch:Show(false)
+end
+
+-- @z_func: HCL_UI.suppress_ci_revealing_layers [internal:Hover Corpse Loot UI] | bind:hcl_ui_cui_rounded_hud_and_grid
+local function suppress_ci_revealing_layers(ci)
+    if ci.bar then ci.bar:Show(false) end
+    if ci.cnt then ci.cnt:Show(false) end
+    if ci.upgr then ci.upgr:Show(false) end
+    if ci.ctxt then ci.ctxt:Show(false) end
+    if ci.ctxts then ci.ctxts:Show(false) end
+    if ci.ico_scope then ci.ico_scope:Show(false) end
+    if ci.ico_sil then ci.ico_sil:Show(false) end
+    if ci.ico_gl then ci.ico_gl:Show(false) end
+    if ci.hl then ci.hl:Show(false) end
+    if ci.shadow then ci.shadow:Show(false) end
+    if ci.ico then ci.ico:Show(false) end
+    if ci.layer then
+        for _, ly in pairs(ci.layer) do
+            if type(ly) == "userdata" then ly:Show(false) end
+        end
+    end
+    -- R.I.S.K. stores Set<CUIStatic, boolean> ([element] = true) in rax_dynamic_front_layers; iterate keys only.
+    if ci.rax_dynamic_front_layers then
+        for elem, _ in pairs(ci.rax_dynamic_front_layers) do
+            if type(elem) == "userdata" then
+                elem:Show(false)
+            end
+        end
+    end
+    if ci.rax_front_layers then
+        for _, ly in pairs(ci.rax_front_layers) do
+            if type(ly) == "userdata" then ly:Show(false) end
+        end
+    end
+    if ci.rax_back_layers then
+        for _, ly in pairs(ci.rax_back_layers) do
+            if type(ly) == "userdata" then ly:Show(false) end
+        end
+    end
+    if ci.cond_text then ci.cond_text:Show(false) end
+    if ci.cond_text_bg then ci.cond_text_bg:Show(false) end
+    if ci.gun_repair_icon then ci.gun_repair_icon:Show(false) end
+    if ci.wpn_name then ci.wpn_name:Show(false) end
+    if ci.wpn_name_bg then ci.wpn_name_bg:Show(false) end
+    if ci.mag_icon then ci.mag_icon:Show(false) end
+    if ci.mag_text then ci.mag_text:Show(false) end
+    if ci.mag_text_bg then ci.mag_text_bg:Show(false) end
+    if ci.recipe_icon then ci.recipe_icon:Show(false) end
+    if ci.money_text then ci.money_text:Show(false) end
+    if ci.money_text_bg then ci.money_text_bg:Show(false) end
+    if ci.parts_indicators then
+        for _, pd in pairs(ci.parts_indicators) do
+            if type(pd) == "userdata" then pd:Show(false) end
+        end
+    end
+    if ci.ammo_name then
+        for _, an in pairs(ci.ammo_name) do
+            if type(an) == "userdata" then an:Show(false) end
+        end
+    end
+    if ci.ammo_name_bg then
+        for _, ab in pairs(ci.ammo_name_bg) do
+            if type(ab) == "userdata" then ab:Show(false) end
+        end
+    end
+end
+
+-- @z_func: HCL_UI.apply_ci_silhouette [internal:Hover Corpse Loot UI] | bind:hcl_ui_cui_rounded_hud_and_grid
+local function apply_ci_silhouette(g, ci, ratio, lttr_cfg)
+    local ov = get_or_create_ci_overlay(g, ci)
+    hide_ci_overlay_widgets(ov)
+    local sec = ci.section
+    local cw = ci.cell:GetWidth()
+    local ch = ci.cell:GetHeight()
+    local ipos = ci.ico and ci.ico:GetWndPos() or vector2():set(0, 0)
+    local iw = (ci.ico and ci.ico:GetWidth()) or cw
+    local ih = (ci.ico and ci.ico:GetHeight()) or ch
+    suppress_ci_revealing_layers(ci)
+
+    local tex = (_G.utils_xml and _G.utils_xml.get_icons_texture and _G.utils_xml.get_icons_texture(sec)) or "ui\\ui_icon_equipment"
+    local axis = (_G.utils_xml and _G.utils_xml.get_item_axis and _G.utils_xml.get_item_axis(sec)) or { x1 = 0, y1 = 0, x2 = 50, y2 = 50 }
+    local rect = Frect():set(axis.x1, axis.y1, axis.x2, axis.y2)
+
+    for i = 1, 8 do
+        local r_st = ov.rim[i]
+        if init_tex_safe(r_st, tex) then
+            r_st:SetTextureRect(rect)
+            r_st:SetWndPos(vector2():set(ipos.x + RIM_OFFSETS[i][1] * ratio, ipos.y + RIM_OFFSETS[i][2]))
+            r_st:SetWndSize(vector2():set(iw, ih))
+            r_st:SetTextureColor(GetARGB(195, 235, 238, 242))
+            r_st:Show(true)
+        end
+    end
+    if init_tex_safe(ov.core, tex) then
+        ov.core:SetTextureRect(rect)
+        ov.core:SetWndPos(vector2():set(ipos.x, ipos.y))
+        ov.core:SetWndSize(vector2():set(iw, ih))
+        ov.core:SetTextureColor(GetARGB(255, 0, 0, 0))
+        ov.core:Show(true)
+    end
+
+    local sp_cfg = lttr_cfg and lttr_cfg.spinner_atlas or nil
+    if sp_cfg and sp_cfg.enabled and sp_cfg.texture and init_tex_safe(ov.spinner, sp_cfg.texture) then
+        local sp_sz = math.min(26, ch * 0.6)
+        local sp_w = sp_sz * ratio
+        ov.spinner:SetWndPos(vector2():set((cw - sp_w) * 0.5, (ch - sp_sz) * 0.5))
+        ov.spinner:SetWndSize(vector2():set(sp_w, sp_sz))
+        local sx1, sy1, sx2, sy2 = hcl_patch.get_atlas_frame_rect(sp_cfg)
+        ov.spinner:SetTextureRect(Frect():set(sx1, sy1, sx2, sy2))
+        ov.spinner:Show(true)
+        g.silhouette_slots[#g.silhouette_slots + 1] = ov
+    end
+end
+
+-- @z_func: HCL_UI.apply_ci_revealed_postpass [internal:Hover Corpse Loot UI] | bind:hcl_ui_cui_rounded_hud_and_grid
+local function apply_ci_revealed_postpass(g, ci, npc_id, ratio)
+    local ov = g.ci_overlays[ci.indx]
+    if ov then
+        hide_ci_overlay_widgets(ov)
+    end
+    if ci.ico then
+        ci.ico:SetTextureColor(GetARGB(255, 255, 255, 255))
+        ci.ico:Show(true)
+    end
+    local fav_meta = hcl_patch and hcl_patch.get_item_fav_junk_meta(ci.section) or nil
+    local suppress_spm_hl = (fav_meta ~= nil) and (not fav_meta.show_hl)
+    if (not suppress_spm_hl) and _G.rax_persistent_highlight ~= nil and ci.Highlight then
+        -- Pass state=false, main_clr=false so rax_persistent_highlight applies SortingPlus/MCM persistent tint without forcing alpha=255.
+        ci:Highlight(false, nil, false)
+    elseif fav_meta and fav_meta.show_hl and fav_meta.bg_color and ci.hl then
+        ci.hl:SetTextureColor(fav_meta.bg_color)
+        ci.hl:Show(true)
+    elseif ci.hl then
+        ci.hl:Show(false)
+    end
+    if ci.hl and (not ci.hl:IsShown()) then
+        ci.hl:SetTextureColor(GetARGB(28, 22, 24, 28))
+        ci.hl:Show(true)
+    end
+
+    if hcl_patch and (not hcl_patch.has_utjan_overlays()) and ci.ID then
+        local obj = level.object_by_id(ci.ID)
+        if obj then
+            ov = ov or get_or_create_ci_overlay(g, ci)
+            local spec = hcl_patch.get_cell_overlay_spec(obj, nil, npc_id)
+            local cw = ci.cell:GetWidth()
+            local ch = ci.cell:GetHeight()
+            if spec.cond_text then
+                ov.fb_cond:SetWndPos(vector2():set(2 * ratio, ch - 15))
+                ov.fb_cond:SetWndSize(vector2():set(math.max(18, cw * 0.65), 13))
+                ov.fb_cond:SetTextColor(spec.cond_color or GetARGB(240, 225, 225, 225))
+                ov.fb_cond:SetText(spec.cond_text)
+                ov.fb_cond:Show(true)
+            end
+            local p_dots = spec.part_dots
+            local n_dots = p_dots and math.min(6, #p_dots) or 0
+            local dot_w = math.max(2, 3 * ratio)
+            for i = 1, n_dots do
+                local d_st = ov.fb_dots[i]
+                d_st:SetWndPos(vector2():set(2 * ratio + (i - 1) * (dot_w + 1.5 * ratio), 2))
+                d_st:SetWndSize(vector2():set(dot_w, 3))
+                d_st:SetTextureColor(p_dots[i].color)
+                d_st:Show(true)
+            end
+            if spec.repair_icon and init_tex_safe(ov.fb_rep_ic, spec.repair_icon) then
+                local rw = 12 * ratio
+                ov.fb_rep_ic:SetWndPos(vector2():set(cw - rw - 2 * ratio, 2))
+                ov.fb_rep_ic:SetWndSize(vector2():set(rw, 12))
+                ov.fb_rep_ic:Show(true)
+            elseif spec.repair_label then
+                local rw = 20 * ratio
+                ov.fb_rep_txt:SetWndPos(vector2():set(cw - rw - 2 * ratio, 2))
+                ov.fb_rep_txt:SetWndSize(vector2():set(rw, 12))
+                ov.fb_rep_txt:SetTextColor(GetARGB(205, 195, 205, 215))
+                ov.fb_rep_txt:SetText(spec.repair_label)
+                ov.fb_rep_txt:Show(true)
+            end
+            if spec.armor_patch and spec.armor_patch.texture and init_tex_safe(ov.fb_patch, spec.armor_patch.texture) then
+                local ph = tonumber(spec.armor_patch.h) or 14
+                local pw = (tonumber(spec.armor_patch.w) or 14) * ratio
+                ov.fb_patch:SetWndPos(vector2():set(cw - pw - 2 * ratio, 15))
+                ov.fb_patch:SetWndSize(vector2():set(pw, ph))
+                ov.fb_patch:Show(true)
+            end
+        end
+    end
+end
+
+local inv_cc_active_ci = nil
+local inv_cc_active_area = nil
+
+-- @z_func: HCL_UI.inv_cc_find_similar [internal:INVENTORY] | bind:hcl_ui_header_identity_and_inventory_swipe | states:INVENTORY
+local function inv_cc_find_similar(self_cc, obj, sec)
+    return inv_cc_active_ci or false
+end
+
+-- @z_func: HCL_UI.inv_cc_find_free_cell [internal:INVENTORY] | bind:hcl_ui_header_identity_and_inventory_swipe | states:INVENTORY
+local function inv_cc_find_free_cell(self_cc, obj, sec)
+    local area = inv_cc_active_area
+    if not area then
+        return false
+    end
+    local max_grow = area.y + area.h + 2
+    while (not self_cc:IsFreeRoom(area.y, area.x, area.w, area.h)) and (#self_cc.grid < max_grow) do
+        self_cc:Grow()
+    end
+    return self_cc:TakeRoom(area.y, area.x, area.w, area.h)
+end
+
+-- @z_func: HCL_UI.run_inv_cc_add_pass [internal:INVENTORY] | bind:hcl_ui_header_identity_and_inventory_swipe | states:INVENTORY
+local function run_inv_cc_add_pass(cc, grid, eff_cols)
+    cc.cols = eff_cols
+    cc:Reinit({})
+    cc.cols = eff_cols
+    cc.deferred = false
+    cc.ignore_scroll = true
+    cc.FindSimilar = inv_cc_find_similar
+    cc.FindFreeCell = inv_cc_find_free_cell
+    for r_idx = 1, (grid and #grid or 0) do
+        local row_tbl = grid[r_idx]
+        for c_idx = 1, (row_tbl and #row_tbl or 0) do
+            local cell = row_tbl[c_idx]
+            local items = cell and cell.items or nil
+            if items and #items > 0 and cell.area then
+                inv_cc_active_ci = nil
+                inv_cc_active_area = cell.area
+                local first_obj = items[1]
+                cc:AddItem(first_obj, nil, nil)
+                inv_cc_active_ci = cc:GetCell_ID(first_obj:id(), false)
+                for k = 2, #items do
+                    cc:AddItem(items[k], nil, nil)
+                end
+                if inv_cc_active_ci and not inv_cc_active_ci.area then
+                    inv_cc_active_ci.area = cell.area
+                end
+            end
+        end
+    end
+    inv_cc_active_ci = nil
+    inv_cc_active_area = nil
+    cc.ignore_scroll = false
+    cc:Scroll_Reinit(false)
+end
+
+-- @z_func: HCL_UI.populate_inventory_grid [internal:INVENTORY] | bind:hcl_ui_header_identity_and_inventory_swipe | states:INVENTORY
+local function populate_inventory_grid(g, grid, cols)
+    local cc = g.cc
+    local eff_cols = math.max(1, tonumber(cols) or 6)
+    if hcl_patch and hcl_patch.configure_cell_container then
+        hcl_patch.configure_cell_container(cc)
+    end
+    local show_cond = hcl_mcm ~= nil and hcl_mcm.get_config("hcl_mcm_cond") == true
+    local show_parts = hcl_mcm ~= nil and hcl_mcm.get_config("hcl_mcm_parts_cond") == true
+    local show_rep = hcl_mcm ~= nil and hcl_mcm.get_config("hcl_mcm_parts_repair_type") == true
+    local show_patch = hcl_mcm ~= nil and hcl_mcm.get_config("hcl_mcm_patches_on_armor") == true
+
+    cc.disable_bar = not show_cond
+    for _, ci in pairs(cc.cell or {}) do
+        if ci then
+            ci.disable_bar = not show_cond
+            ci.disable_bar_og = not show_cond
+        end
+    end
+
+    local utj_s = (_G.z_item_icon_info and type(_G.z_item_icon_info.settings) == "table") and _G.z_item_icon_info.settings or nil
+    local sv_cond_en, sv_pd_en, sv_pd_wpn, sv_pd_arm, sv_gun_rep, sv_arm_rep, sv_arm_patch
+    if utj_s then
+        if type(utj_s.cond_text) == "table" then
+            sv_cond_en = utj_s.cond_text.enable
+            utj_s.cond_text.enable = show_cond
+        end
+        if type(utj_s.part_dots) == "table" then
+            sv_pd_en = utj_s.part_dots.enable
+            sv_pd_wpn = utj_s.part_dots.show_on_wpn
+            sv_pd_arm = utj_s.part_dots.show_on_armor
+            utj_s.part_dots.enable = show_parts
+            if show_parts then
+                utj_s.part_dots.show_on_wpn = true
+                utj_s.part_dots.show_on_armor = true
+            end
+        end
+        if type(utj_s.wpn_info) == "table" then
+            sv_gun_rep = utj_s.wpn_info.show_gun_repair_type
+            utj_s.wpn_info.show_gun_repair_type = show_rep
+        end
+        if type(utj_s.armor_info) == "table" then
+            sv_arm_rep = utj_s.armor_info.show_armor_type
+            sv_arm_patch = utj_s.armor_info.show_patch
+            utj_s.armor_info.show_armor_type = show_rep
+            utj_s.armor_info.show_patch = show_patch
+        end
+    end
+
+    local risk_rt = (_G.risk_enhancement_core and type(_G.risk_enhancement_core.RUNTIME) == "table") and _G.risk_enhancement_core.RUNTIME or nil
+    local sv_risk_loot = risk_rt and risk_rt.active_loot_mode or nil
+    if risk_rt then
+        risk_rt.active_loot_mode = false
+    end
+
+    local ok, err = pcall(run_inv_cc_add_pass, cc, grid, eff_cols)
+    inv_cc_active_ci = nil
+    inv_cc_active_area = nil
+    cc.ignore_scroll = false
+    if hcl_patch and hcl_patch.configure_cell_container then
+        hcl_patch.configure_cell_container(cc)
+    end
+
+    if risk_rt then
+        risk_rt.active_loot_mode = sv_risk_loot
+    end
+    if utj_s then
+        if type(utj_s.cond_text) == "table" then utj_s.cond_text.enable = sv_cond_en end
+        if type(utj_s.part_dots) == "table" then
+            utj_s.part_dots.enable = sv_pd_en
+            utj_s.part_dots.show_on_wpn = sv_pd_wpn
+            utj_s.part_dots.show_on_armor = sv_pd_arm
+        end
+        if type(utj_s.wpn_info) == "table" then utj_s.wpn_info.show_gun_repair_type = sv_gun_rep end
+        if type(utj_s.armor_info) == "table" then
+            utj_s.armor_info.show_armor_type = sv_arm_rep
+            utj_s.armor_info.show_patch = sv_arm_patch
+        end
+    end
+    for _, ln in pairs(cc.line or {}) do
+        if type(ln) == "userdata" then
+            ln:Show(false)
+        end
+    end
+    if not ok then
+        z_probe(1, "hcl_ui.populate_inventory_grid", "Inventory LIFO grid build error: %s", tostring(err))
+    end
+end
+
+-- @z_func: HCL_UI.measure_grid_content_height [internal:Hover Corpse Loot UI] | bind:hcl_ui_cui_rounded_hud_and_grid
+local function measure_grid_content_height(grid)
+    if not grid or #grid == 0 then
+        return 75
+    end
+    if grid.content_px_h and grid.content_px_h > 0 then
+        return grid.content_px_h
+    end
+    local step_y = ui_config.cell_grid_size + ui_config.cell_grid_line
+    local row_end = grid.row_end or #grid
+    return math.max(75, row_end * step_y + 4)
+end
+
+-- @z_func: HCL_UI.rebuild_visual_grid [internal:Hover Corpse Loot UI] | bind:hcl_ui_header_identity_and_inventory_swipe | states:INVENTORY,PREVIEW,LOOTING
+local function rebuild_visual_grid(g, grid, npc_id, main_x, vp_h, content_h, is_inventory)
+    local ratio = get_screen_ratio()
+    local cols = (grid and grid.max_cols) or ((hcl_patch and hcl_patch.compute_grid_cols and hcl_patch.compute_grid_cols(main_x, ratio)) or 6)
+    local g_ver = (hcl_loot and hcl_loot.get_grid_version()) or 0
+    local p_seq = (hcl_patch and hcl_patch.get_patch_dirty_seq()) or 0
+    local loot_mode = (hcl_loot and hcl_loot.get_loot_mode()) or "IDLE"
+    local is_inv = (is_inventory == true) or (grid ~= nil and grid.is_inventory == true)
+    local grid_key = string.format("%s:%s:%s:%d:%d:%d:%d:%d:%d:%.4f:%s", is_inv and "INV" or "CRP", tostring(loot_mode), tostring(npc_id), g_ver, p_seq, main_x, vp_h, content_h, cols, ratio, tostring(mcm_ui_dirty))
+    if g.cache_grid_key == grid_key then
+        return
+    end
+    g.cache_grid_key = grid_key
+    mcm_ui_dirty = false
+
+    local overflow = content_h > vp_h
+    g.content_h = content_h
+    g.overflow = overflow
+    local prev_scroll = overflow and g.cur_scroll or 0
+
+    g.silhouette_slots = {}
+    if is_inv then
+        populate_inventory_grid(g, grid, cols)
+    elseif hcl_patch and hcl_patch.populate_cell_container then
+        hcl_patch.populate_cell_container(g.cc, grid and grid.raw_items or nil, npc_id, cols)
+    else
+        g.cc:Reset()
+    end
+
+    local cur_cap = #g.cc.cell
+    if cur_cap > g.last_cc_cap then
+        g.last_cc_cap = cur_cap
+        for i = 1, 4 do
+            local b = g.cursor_borders[i]
+            g.cc.st:DetachChild(b)
+            g.cc.st:AttachChild(b)
+        end
+    end
+
+    local lttr_cfg = (not is_inv and hcl_patch) and hcl_patch.get_lttr_render_config() or nil
+    for idx = 1, (g.cc.idxer or 0) do
+        local ci = g.cc.cell[idx]
+        if ci and ci:IsShown() and ci.ID then
+            if ci.area and ci.W and (ci.area.w * ui_config.cell_grid_size) < ci.W then
+                local clamped_w = ci.area.w * ui_config.cell_grid_size * ratio
+                ci.cell:SetWndSize(vector2():set(clamped_w, ci.cell:GetHeight()))
+                if ci.hl then ci.hl:SetWndSize(vector2():set(clamped_w, ci.cell:GetHeight())) end
+            end
+            if is_inv then
+                apply_ci_revealed_postpass(g, ci, nil, ratio)
+            else
+                local rev = (hcl_patch and hcl_patch.get_item_reveal_state(npc_id, ci.ID)) or "revealed"
+                if rev ~= "revealed" then
+                    apply_ci_silhouette(g, ci, ratio, lttr_cfg)
+                else
+                    apply_ci_revealed_postpass(g, ci, npc_id, ratio)
+                end
+            end
+        end
+    end
+
+    local init_scroll = math.max(0, math.floor(prev_scroll + 0.5))
+    g.cc.scroll:SetFixedScrollBar(false)
+    g.cc.scroll:SetScrollPos(1)
+    g.cc.scroll:SetScrollPos(init_scroll)
+    g.last_scroll_px = init_scroll
+    g.cache_cursor_id = nil
+    g.cache_cursor_rect = nil
+    g.cursor_settled = false
+    g.cache_footer_key = nil
+    g.last_spinner_pos = nil
+end
+
+-- @z_func: HCL_UI.find_live_cell_rect [internal:LOOTING] | bind:hcl_ui_cui_rounded_hud_and_grid | states:LOOTING,INVENTORY
+local function find_live_cell_rect(g)
+    local cur_obj = hcl_loot and hcl_loot.get_cursor_object() or nil
+    if not cur_obj then
+        g.cache_cursor_id = nil
+        g.cache_cursor_rect = nil
+        return nil
+    end
+    local target_id = cur_obj:id()
+    if g.cache_cursor_id == target_id and g.cache_cursor_rect ~= nil then
+        return g.cache_cursor_rect
+    end
+    local ci = g.cc:GetCell_ID(target_id, false)
+    if not (ci and ci:IsShown()) then
+        ci = nil
+        for idx = 1, (g.cc.idxer or 0) do
+            local cand = g.cc.cell[idx]
+            if cand and cand:IsShown() and (cand.ID == target_id or (cand.childs and cand.childs[target_id])) then
+                ci = cand
+                break
+            end
+        end
+    end
+    if not (ci and ci.cell) then
+        g.cache_cursor_id = nil
+        g.cache_cursor_rect = nil
+        return nil
+    end
+    local pos = ci.cell:GetWndPos()
+    local rect = {
+        x = pos.x,
+        y = pos.y,
+        w = ci.cell:GetWidth(),
+        h = ci.cell:GetHeight(),
+    }
+    g.cache_cursor_id = target_id
+    g.cache_cursor_rect = rect
+    g.cursor_settled = false
+    return rect
+end
+
+-- @z_func: HCL_UI.update_active_spinners [internal:PREVIEW] | bind:hcl_ui_cui_rounded_hud_and_grid | states:PREVIEW,LOOTING
+local function update_active_spinners(g)
+    if #g.silhouette_slots == 0 or not hcl_patch then
+        return
+    end
+    local lttr_cfg = hcl_patch.get_lttr_render_config()
+    local sp_cfg = lttr_cfg and lttr_cfg.spinner_atlas or nil
+    if not (sp_cfg and sp_cfg.enabled) then
+        return
+    end
+    local x1, y1, x2, y2 = hcl_patch.get_atlas_frame_rect(sp_cfg)
+    local pos_key = x1 * 4096 + y1
+    if g.last_spinner_pos == pos_key then
+        return
+    end
+    g.last_spinner_pos = pos_key
+    local rect = Frect():set(x1, y1, x2, y2)
+    for i = 1, #g.silhouette_slots do
+        local ov = g.silhouette_slots[i]
+        if ov and ov.spinner and ov.spinner:IsShown() then
+            ov.spinner:SetTextureRect(rect)
+        end
+    end
+end
+
+-- @z_func: HCL_UI.hide_cursor_widgets [internal:HIDDEN] | bind:hcl_ui_cui_rounded_hud_and_grid | states:HIDDEN,CLAIMED,EMPTY,PREVIEW
+local function hide_cursor_widgets(g)
+    if not g.cursor_hidden then
+        g.cursor_fill:Show(false)
+        for i = 1, 4 do
+            g.cursor_borders[i]:Show(false)
+        end
+        g.cursor_hidden = true
+    end
+    g.cursor_ready = false
+    g.cursor_settled = false
+    g.cache_cursor_id = nil
+    g.cache_cursor_rect = nil
+end
+
+-- @z_func: HCL_UI.update_cursor_and_scroll [internal:LOOTING] | bind:hcl_ui_cui_rounded_hud_and_grid | states:LOOTING,INVENTORY
+local function update_cursor_and_scroll(g, dt)
+    local rect = find_live_cell_rect(g)
+    if not rect then
+        hide_cursor_widgets(g)
         return
     end
 
-    local cp = hcl_loot.get_cursor_params()
-    local cidx = cp and cp.cursor_idx or nil
-    local cobj = cp and cp.cursor_object or nil
-    local ci = cidx and hud_ui.ui_cell_rows[cidx.y] and hud_ui.ui_cell_rows[cidx.y][cidx.x] or nil
+    local clr_name = (hcl_mcm and tostring(hcl_mcm.get_config("hcl_mcm_cursor_color"))) or "Gold"
+    local br_pct = (hcl_mcm and tonumber(hcl_mcm.get_config("hcl_mcm_cursor_color_brightness"))) or 75
+    local clr_key = clr_name .. ":" .. tostring(br_pct)
+    local clr_changed = (g.cache_cursor_clr ~= clr_key)
 
-    if ci and ci.cell then
-        local cpos = ci.cell:GetWndPos()
-        local tx = margin_x + cpos.x
-        local ty = ui_metrics.header_h + 4 + cpos.y - hud_ui.scroll_pos
-        local tw = ci.cell:GetWidth()
-        local th = ci.cell:GetHeight()
-
-        local min_vis_y = ui_metrics.header_h + 2
-        local max_vis_y = ui_metrics.header_h + hud_ui.body_h - 2
-        if ty < min_vis_y then
-            th = math.max(0, th - (min_vis_y - ty))
-            ty = min_vis_y
-        end
-        if (ty + th) > max_vis_y then
-            th = math.max(0, max_vis_y - ty)
-        end
-
-        local cl = hud_ui.cur_lerp
-        if not cl.initialized then
-            cl.x, cl.y, cl.w, cl.h = tx, ty, tw, th
-            cl.initialized = true
+    if (not g.cursor_settled) or clr_changed or g.cursor_hidden then
+        local ratio = get_screen_ratio()
+        if not g.cursor_ready then
+            g.cur_x = rect.x
+            g.cur_y = rect.y
+            g.cur_w = rect.w
+            g.cur_h = rect.h
+            g.cursor_ready = true
+            g.cursor_settled = true
         else
-            local k = 1.0 - math.exp(-16.0 * dt)
-            cl.x = cl.x + (tx - cl.x) * k
-            cl.y = cl.y + (ty - cl.y) * k
-            cl.w = cl.w + (tw - cl.w) * k
-            cl.h = cl.h + (th - cl.h) * k
+            local t = 1.0 - math.exp(-24.0 * dt)
+            g.cur_x = g.cur_x + (rect.x - g.cur_x) * t
+            g.cur_y = g.cur_y + (rect.y - g.cur_y) * t
+            g.cur_w = g.cur_w + (rect.w - g.cur_w) * t
+            g.cur_h = g.cur_h + (rect.h - g.cur_h) * t
+            if math.abs(rect.x - g.cur_x) < 0.05
+                and math.abs(rect.y - g.cur_y) < 0.05
+                and math.abs(rect.w - g.cur_w) < 0.05
+                and math.abs(rect.h - g.cur_h) < 0.05 then
+                g.cur_x = rect.x
+                g.cur_y = rect.y
+                g.cur_w = rect.w
+                g.cur_h = rect.h
+                g.cursor_settled = true
+            end
         end
 
-        if cl.h > 1 then
-            dlg.cursor:SetWndPos(vector2():set(cl.x, cl.y))
-            dlg.cursor:SetWndSize(vector2():set(cl.w, cl.h))
-            dlg.cursor:SetTextureColor(resolve_cursor_argb())
-            dlg.cursor:Show(true)
-        else
-            dlg.cursor:Show(false)
+        g.cursor_fill:SetWndPos(vector2():set(g.cur_x, g.cur_y))
+        g.cursor_fill:SetWndSize(vector2():set(g.cur_w, g.cur_h))
+
+        local bw = math.max(0.8, 1.0 * ratio)
+        g.cursor_borders[1]:SetWndPos(vector2():set(g.cur_x, g.cur_y))
+        g.cursor_borders[1]:SetWndSize(vector2():set(g.cur_w, 1))
+        g.cursor_borders[2]:SetWndPos(vector2():set(g.cur_x, g.cur_y + g.cur_h - 1))
+        g.cursor_borders[2]:SetWndSize(vector2():set(g.cur_w, 1))
+        g.cursor_borders[3]:SetWndPos(vector2():set(g.cur_x, g.cur_y))
+        g.cursor_borders[3]:SetWndSize(vector2():set(bw, g.cur_h))
+        g.cursor_borders[4]:SetWndPos(vector2():set(g.cur_x + g.cur_w - bw, g.cur_y))
+        g.cursor_borders[4]:SetWndSize(vector2():set(bw, g.cur_h))
+
+        if clr_changed then
+            g.cache_cursor_clr = clr_key
+            local base_rgb = CURSOR_COLORS[clr_name] or CURSOR_COLORS.Gold
+            local br = math.max(0.01, math.min(1.0, br_pct / 100.0))
+            local cr = math.floor(base_rgb[1] * br + 0.5)
+            local cg = math.floor(base_rgb[2] * br + 0.5)
+            local cb = math.floor(base_rgb[3] * br + 0.5)
+            g.cursor_fill:SetTextureColor(GetARGB(42, cr, cg, cb))
+            local b_argb = GetARGB(145, cr, cg, cb)
+            for i = 1, 4 do
+                g.cursor_borders[i]:SetTextureColor(b_argb)
+            end
         end
-    else
-        dlg.cursor:Show(false)
-        hud_ui.cur_lerp.initialized = false
+        if g.cursor_hidden then
+            g.cursor_fill:Show(true)
+            for i = 1, 4 do
+                g.cursor_borders[i]:Show(true)
+            end
+            g.cursor_hidden = false
+        end
     end
 
-    if cobj and corpse and hcl_loot.is_item_lootable(corpse:id(), cobj:id()) then
-        local sec = cobj:section()
-        local item_name = (ui_item and ui_item.get_obj_name and ui_item.get_obj_name(cobj))
-            or game.translate_string(SYS_GetParam(0, sec, "inv_name") or sec)
-        local text_h = footer_claimed_by_ltt and 20 or 22
-        set_centered_truncated_text(dlg.footer_text, item_name, base_w, margin_x, 2, sep_w, text_h)
-        dlg.footer_text:SetTextColor(GetARGB(240, 232, 234, 238))
-    else
-        dlg.footer_text:SetText("")
+    -- Guard SetScrollPos against unchanged integer positions so C++ CUIScrollView::RecalcSize never runs on stationary frames.
+    local max_scroll = math.max(0, g.cc.st:GetHeight())
+    if max_scroll > 0 then
+        local target_scroll = math.max(0, math.min(max_scroll, (rect.y + rect.h * 0.5) - (g.viewport_h * 0.5)))
+        if math.abs(target_scroll - g.cur_scroll) > 0.25 then
+            local st = 1.0 - math.exp(-18.0 * dt)
+            g.cur_scroll = g.cur_scroll + (target_scroll - g.cur_scroll) * st
+        else
+            g.cur_scroll = target_scroll
+        end
+        local scroll_px = math.floor(g.cur_scroll + 0.5)
+        if scroll_px ~= g.last_scroll_px then
+            g.last_scroll_px = scroll_px
+            g.cc.scroll:SetScrollPos(scroll_px)
+        end
     end
 end
 
--- @z_func: HCL_UI.enter_ui_hidden [export:state:HIDDEN] | bind:hcl_hud_dialog_and_layout
+-- @z_func: HCL_UI.truncate_item_label [internal:LOOTING] | bind:hcl_ui_cui_rounded_hud_and_grid | states:LOOTING,INVENTORY
+local function truncate_item_label(text, main_x, ratio)
+    local s = tostring(text or "")
+    local max_chars = math.max(12, math.floor((main_x - 16) / math.max(4.0, 6.4 * ratio)))
+    if #s > max_chars then
+        return string.sub(s, 1, max_chars - 3) .. "..."
+    end
+    return s
+end
+
+-- @z_func: HCL_UI.update_footer_display [internal:LOOTING] | bind:hcl_ui_cui_rounded_hud_and_grid | states:PREVIEW,LOOTING,INVENTORY,CLAIMED,EMPTY
+local function update_footer_display(g, npc_id, main_x, show_cursor_item, is_inventory)
+    local cur_obj = (show_cursor_item and hcl_loot) and hcl_loot.get_cursor_object() or nil
+    local cur_id = cur_obj and cur_obj:id() or nil
+    if cur_id and (is_inventory or not hcl_patch or hcl_patch.is_item_revealed(npc_id, cur_id)) then
+        local f_key = string.format("item:%s:%d:%d", is_inventory and "inv" or "crp", cur_id, main_x)
+        if g.cache_footer_key ~= f_key then
+            g.cache_footer_key = f_key
+            g.last_ind_pos = nil
+            local ratio = get_screen_ratio()
+            g.footer_ind:Show(false)
+            local raw_name = (_G.ui_item and _G.ui_item.get_obj_name and _G.ui_item.get_obj_name(cur_obj)) or cur_obj:section()
+            g.footer_txt:SetText(truncate_item_label(raw_name, main_x, ratio))
+            g.footer_txt:Show(true)
+        end
+        return
+    end
+    if (not is_inventory) and hcl_patch and hcl_patch.is_searching(npc_id) then
+        local lttr_cfg = hcl_patch.get_lttr_render_config()
+        local ind = lttr_cfg and lttr_cfg.indicator_atlas or nil
+        if ind and ind.hud_icon ~= 0 and ind.style ~= "text" and ind.style ~= "none" and ind.texture then
+            if g.cache_footer_tex ~= ind.texture then
+                if init_tex_safe(g.footer_ind, ind.texture) then
+                    g.cache_footer_tex = ind.texture
+                    g.cache_footer_key = nil
+                end
+            end
+            if g.cache_footer_tex == ind.texture then
+                local f_key = string.format("ind:%s:%d:%.2f", ind.texture, main_x, ind.scale or 0.7)
+                if g.cache_footer_key ~= f_key then
+                    g.cache_footer_key = f_key
+                    g.last_ind_pos = nil
+                    local ratio = get_screen_ratio()
+                    local sc = ind.scale or 0.7
+                    local iw = ind.base_w * sc * ratio
+                    local ih = ind.base_h * sc
+                    local fit = math.min(1.0, (main_x - 16) / math.max(1, iw), 19.0 / math.max(1, ih))
+                    iw = iw * fit
+                    ih = ih * fit
+                    g.footer_ind:SetWndPos(vector2():set((main_x - iw) * 0.5, 2 + (21 - ih) * 0.5))
+                    g.footer_ind:SetWndSize(vector2():set(iw, ih))
+                    g.footer_ind:Show(true)
+                    g.footer_txt:Show(false)
+                end
+                local x1, y1, x2, y2 = hcl_patch.get_atlas_frame_rect(ind)
+                local pos_key = x1 * 4096 + y1
+                if g.last_ind_pos ~= pos_key then
+                    g.last_ind_pos = pos_key
+                    g.footer_ind:SetTextureRect(Frect():set(x1, y1, x2, y2))
+                end
+                return
+            end
+        end
+        local dots_n = (math.floor(time_global() / 330) % 3) + 1
+        local f_key = "dots:" .. tostring(dots_n)
+        if g.cache_footer_key ~= f_key then
+            g.cache_footer_key = f_key
+            g.last_ind_pos = nil
+            g.footer_ind:Show(false)
+            local base_lbl = game.translate_string("st_xcvb_looting")
+            if not base_lbl or base_lbl == "st_xcvb_looting" then
+                base_lbl = "Searching"
+            else
+                base_lbl = string.gsub(base_lbl, "%.+$", "")
+            end
+            g.footer_txt:SetText(base_lbl .. string.rep(".", dots_n))
+            g.footer_txt:Show(true)
+        end
+        return
+    end
+    if g.cache_footer_key ~= "empty" then
+        g.cache_footer_key = "empty"
+        g.last_ind_pos = nil
+        g.footer_ind:Show(false)
+        g.footer_txt:Show(false)
+    end
+end
+
+-- @z_func: HCL_UI.sync_hud_attachment [internal:HIDDEN] | bind:hcl_ui_cui_rounded_hud_and_grid | states:HIDDEN,CLAIMED,INVENTORY,EMPTY,PREVIEW,LOOTING
+local function sync_hud_attachment(should_attach)
+    if should_attach then
+        local g = ensure_gui_created()
+        if not gui_attached then
+            local hud = get_hud and get_hud() or nil
+            if hud then
+                hud:AddDialogToRender(g.wnd)
+                gui_attached = true
+            end
+        end
+        return g
+    end
+    if gui_attached and gui ~= nil then
+        local hud = get_hud and get_hud() or nil
+        if hud then
+            hud:RemoveDialogToRender(gui.wnd)
+        end
+        gui_attached = false
+    end
+    return gui
+end
+
+-- @z_func: HCL_UI.enter_ui_hidden [export:state:HIDDEN] | bind:hcl_ui_cui_rounded_hud_and_grid | states:HIDDEN
 function enter_ui_hidden()
-    pause_ltt_search()
-    unmount_hud_dialog()
-    hud_ui.active_state = "HIDDEN"
-    hud_ui.active_corpse_id = nil
-    hud_ui.last_inv_hash = nil
-    hud_ui.scroll_pos = 0
-    hud_ui.ui_cell_rows = {}
-    hud_ui.cur_lerp.initialized = false
+    local was_visible = (ui_state ~= "HIDDEN")
+    ui_state = "HIDDEN"
+    sync_hud_attachment(false)
+    if gui ~= nil then
+        reset_swipe_offset(gui)
+        hide_cursor_widgets(gui)
+        gui.badge_claimed:Show(false)
+        gui.badge_empty:Show(false)
+        if was_visible and (gui.cc.idxer or 0) > 0 then
+            gui.cc:Reset()
+        end
+        gui.cache_grid_key = nil
+        gui.cache_footer_key = nil
+        gui.last_corpse_id = nil
+        gui.cur_scroll = 0
+        gui.last_scroll_px = -1
+    end
+    if was_visible then
+        z_probe(2, "hcl_ui.enter_ui_hidden", "Detached Hover UI from HUD")
+    end
 end
 
--- @z_func: HCL_UI.enter_ui_claimed [export:state:CLAIMED] | bind:hcl_hud_dialog_and_layout
-function enter_ui_claimed(corpse)
-    pause_ltt_search()
-    mount_hud_dialog()
-    local dlg = hud_ui.dialog
-    local base_w = tonumber(hcl_mcm.get_config("hcl_ui_main_x")) or 300
-
-    hud_ui.active_state = "CLAIMED"
-    hud_ui.active_corpse_id = corpse:id()
-    hud_ui.last_inv_hash = nil
-    hud_ui.ui_cell_rows = {}
-    hcl_loot.sync_grid_rows({})
-
-    update_header_info(dlg, corpse, base_w, "IDLE")
-    dlg.loot_container:Show(false)
-    dlg.cursor:Show(false)
-    dlg.footer_ltt_icon:Show(false)
-    if dlg.footer_ltt_text then
-        dlg.footer_ltt_text:Show(false)
+-- @z_func: HCL_UI.enter_ui_claimed [export:state:CLAIMED] | bind:hcl_ui_stencil_pill_badges | states:CLAIMED
+function enter_ui_claimed(npc)
+    local g = sync_hud_attachment(true)
+    local entering = (ui_state ~= "CLAIMED")
+    ui_state = "CLAIMED"
+    reset_swipe_offset(g)
+    local main_x = (hcl_mcm and tonumber(hcl_mcm.get_config("hcl_mcm_ui_main_x"))) or 300
+    update_window_frame(g, main_x, 75, nil)
+    update_header_display(g, npc, main_x, hcl_loot and hcl_loot.is_corpse_looted() or false, false)
+    if entering then
+        g.cc.prof:Show(false)
+        hide_cursor_widgets(g)
+        g.badge_empty:Show(false)
+        g.badge_claimed:Show(true)
+        g.footer_ind:Show(false)
+        g.footer_txt:Show(false)
+        g.cache_footer_key = "empty"
     end
-    dlg.footer_text:SetText("")
-
-    local claimed_str = game.translate_string("st_hcl_claimed_status")
-    if not claimed_str or claimed_str == "" or claimed_str == "st_hcl_claimed_status" then
-        claimed_str = "<CLAIMED>"
-    end
-    dlg.status_text:SetText(claimed_str)
-    dlg.status_text:SetTextColor(GetARGB(255, 255, 220, 45))
-    dlg.status_text:Show(true)
-
-    update_window_geometry_and_scroll(dlg, base_w, 55, false)
 end
 
--- @z_func: HCL_UI.enter_ui_empty [export:state:EMPTY] | bind:hcl_hud_dialog_and_layout
-function enter_ui_empty(corpse, cb_status)
-    mount_hud_dialog()
-    local dlg = hud_ui.dialog
-    local base_w = tonumber(hcl_mcm.get_config("hcl_ui_main_x")) or 300
-
-    hud_ui.active_state = "EMPTY"
-    hud_ui.active_corpse_id = corpse:id()
-    hud_ui.last_inv_hash = "__EMPTY__"
-    hud_ui.ui_cell_rows = {}
-    hcl_loot.sync_grid_rows({})
-
-    update_header_info(dlg, corpse, base_w, cb_status)
-    dlg.loot_container:Show(false)
-    dlg.cursor:Show(false)
-    dlg.footer_ltt_icon:Show(false)
-    if dlg.footer_ltt_text then
-        dlg.footer_ltt_text:Show(false)
+-- @z_func: HCL_UI.enter_ui_inventory [export:state:INVENTORY] | bind:hcl_ui_header_identity_and_inventory_swipe | states:INVENTORY
+function enter_ui_inventory(npc, dt, tg)
+    local g = sync_hud_attachment(true)
+    local prev_state = ui_state
+    local entering = (prev_state ~= "INVENTORY")
+    ui_state = "INVENTORY"
+    local npc_id = npc:id()
+    local main_x = (hcl_mcm and tonumber(hcl_mcm.get_config("hcl_mcm_ui_main_x"))) or 300
+    if entering then
+        if prev_state == "LOOTING" and g.last_corpse_id == npc_id then
+            start_swipe_transition(g, 1, main_x, tg)
+        else
+            reset_swipe_offset(g)
+        end
+        g.last_corpse_id = npc_id
+        g.cur_scroll = 0
+        g.last_scroll_px = -1
+        g.cursor_ready = false
+        g.cursor_settled = false
+        g.badge_claimed:Show(false)
+        g.badge_empty:Show(false)
+        g.cc.prof:Show(true)
+        g.cc.scroll:Show(true)
     end
-    dlg.footer_text:SetText("")
-
-    local empty_str = game.translate_string("st_hcl_empty_status")
-    if not empty_str or empty_str == "" or empty_str == "st_hcl_empty_status" then
-        empty_str = "<EMPTY>"
-    end
-    dlg.status_text:SetText(empty_str)
-    dlg.status_text:SetTextColor(GetARGB(220, 215, 220, 225))
-    dlg.status_text:Show(true)
-
-    update_window_geometry_and_scroll(dlg, base_w, 55, false)
+    local grid = hcl_loot and hcl_loot.get_item_grid() or nil
+    local content_h = measure_grid_content_height(grid)
+    local vp_h = update_window_frame(g, main_x, content_h, grid and grid.max_cols or nil)
+    update_header_display(g, npc, main_x, false, true)
+    rebuild_visual_grid(g, grid, npc_id, main_x, vp_h, content_h, true)
+    update_cursor_and_scroll(g, dt)
+    update_swipe_offset(g, tg)
+    update_footer_display(g, npc_id, main_x, true, true)
 end
 
--- @z_func: HCL_UI.render_populated_corpse_ui [internal:shared] | bind:hcl_sortingplus_grid | states:PREVIEW,LOOTING
-local function render_populated_corpse_ui(corpse, cb_status, items, hidden_count, max_item_w, inv_hash)
-    mount_hud_dialog()
-    local dlg = hud_ui.dialog
-    local base_w = tonumber(hcl_mcm.get_config("hcl_ui_main_x")) or 300
-    local cid = corpse:id()
-
-    dlg.status_text:Show(false)
-    dlg.loot_container:Show(true)
-    hud_ui.has_hidden_ltt = (hidden_count > 0)
-
-    if hud_ui.active_corpse_id ~= cid then
-        hud_ui.active_corpse_id = cid
-        hud_ui.last_inv_hash = nil
-        hud_ui.scroll_pos = 0
-        hud_ui.cur_lerp.initialized = false
+-- @z_func: HCL_UI.enter_ui_empty [export:state:EMPTY] | bind:hcl_ui_stencil_pill_badges | states:EMPTY
+function enter_ui_empty(npc, tg)
+    local g = sync_hud_attachment(true)
+    local prev_state = ui_state
+    local entering = (prev_state ~= "EMPTY")
+    ui_state = "EMPTY"
+    local npc_id = npc:id()
+    local main_x = (hcl_mcm and tonumber(hcl_mcm.get_config("hcl_mcm_ui_main_x"))) or 300
+    if entering then
+        if prev_state == "INVENTORY" and g.last_corpse_id == npc_id and tg then
+            start_swipe_transition(g, -1, main_x, tg)
+        else
+            reset_swipe_offset(g)
+        end
+        g.last_corpse_id = npc_id
+        g.cc.prof:Show(false)
+        hide_cursor_widgets(g)
+        g.badge_claimed:Show(false)
+        g.badge_empty:Show(true)
+        g.footer_ind:Show(false)
+        g.footer_txt:Show(false)
+        g.cache_footer_key = "empty"
     end
-
-    if hud_ui.last_inv_hash ~= inv_hash then
-        hud_ui.last_inv_hash = inv_hash
-        rebuild_loot_grid(dlg, corpse, items, max_item_w, base_w)
+    update_window_frame(g, main_x, 75, nil)
+    update_header_display(g, npc, main_x, hcl_loot and hcl_loot.is_corpse_looted() or false, false)
+    if tg then
+        update_swipe_offset(g, tg)
     end
-
-    local ltt_active = (_G.zzzz_loot_searching and zzzz_loot_searching.is_item_hidden) and true or false
-    local ltt_hud_on = ltt_active and (hidden_count > 0) and (get_ltt_config("hud_enable", true) and true or false)
-    local cp = (cb_status == "LOOT") and hcl_loot.get_cursor_params() or nil
-    local sel_obj = cp and cp.cursor_object or nil
-    local sel_rev = sel_obj and hcl_loot.is_item_lootable(cid, sel_obj:id()) or false
-    local eff_footer_h = (ltt_hud_on and sel_rev) and 42 or ui_metrics.footer_h
-
-    update_header_info(dlg, corpse, base_w, cb_status)
-    update_window_geometry_and_scroll(dlg, base_w, hud_ui.content_h, true, eff_footer_h)
-    local ltt_footer = apply_looting_takes_time_visuals(dlg, corpse, base_w, cb_status)
-    update_cursor_and_footer(dlg, corpse, base_w, cb_status, ltt_footer)
 end
 
--- @z_func: HCL_UI.enter_ui_preview [export:state:PREVIEW] | bind:hcl_sortingplus_grid
-function enter_ui_preview(corpse, items, hidden_count, max_item_w, inv_hash)
-    hud_ui.active_state = "PREVIEW"
-    render_populated_corpse_ui(corpse, "PREVIEW", items, hidden_count, max_item_w, inv_hash)
+-- @z_func: HCL_UI.enter_ui_preview [export:state:PREVIEW] | bind:hcl_ui_cui_rounded_hud_and_grid | states:PREVIEW
+function enter_ui_preview(npc)
+    local g = sync_hud_attachment(true)
+    local entering = (ui_state ~= "PREVIEW")
+    ui_state = "PREVIEW"
+    reset_swipe_offset(g)
+    local npc_id = npc:id()
+    if g.last_corpse_id ~= npc_id then
+        g.last_corpse_id = npc_id
+        g.cur_scroll = 0
+        g.last_scroll_px = -1
+        g.cursor_ready = false
+    end
+    local main_x = (hcl_mcm and tonumber(hcl_mcm.get_config("hcl_mcm_ui_main_x"))) or 300
+    local grid = hcl_loot and hcl_loot.get_item_grid() or nil
+    local content_h = measure_grid_content_height(grid)
+    local vp_h = update_window_frame(g, main_x, content_h, grid and grid.max_cols or nil)
+    update_header_display(g, npc, main_x, hcl_loot and hcl_loot.is_corpse_looted() or false, false)
+    if entering then
+        g.badge_claimed:Show(false)
+        g.badge_empty:Show(false)
+        g.cc.prof:Show(true)
+        g.cc.scroll:Show(true)
+        hide_cursor_widgets(g)
+    end
+    rebuild_visual_grid(g, grid, npc_id, main_x, vp_h, content_h, false)
+    update_active_spinners(g)
+    update_footer_display(g, npc_id, main_x, false, false)
 end
 
--- @z_func: HCL_UI.enter_ui_looting [export:state:LOOTING] | bind:hcl_hud_dialog_and_layout
-function enter_ui_looting(corpse, items, hidden_count, max_item_w, inv_hash)
-    hud_ui.active_state = "LOOTING"
-    render_populated_corpse_ui(corpse, "LOOT", items, hidden_count, max_item_w, inv_hash)
+-- @z_func: HCL_UI.enter_ui_looting [export:state:LOOTING] | bind:hcl_ui_header_identity_and_inventory_swipe | states:LOOTING
+function enter_ui_looting(npc, dt, tg)
+    local g = sync_hud_attachment(true)
+    local prev_state = ui_state
+    local entering = (prev_state ~= "LOOTING")
+    ui_state = "LOOTING"
+    local npc_id = npc:id()
+    local main_x = (hcl_mcm and tonumber(hcl_mcm.get_config("hcl_mcm_ui_main_x"))) or 300
+    if g.last_corpse_id ~= npc_id or entering then
+        if entering and prev_state == "INVENTORY" and g.last_corpse_id == npc_id and tg then
+            start_swipe_transition(g, -1, main_x, tg)
+        elseif g.last_corpse_id ~= npc_id then
+            reset_swipe_offset(g)
+            g.cur_scroll = 0
+            g.last_scroll_px = -1
+        end
+        if prev_state == "INVENTORY" and g.last_corpse_id == npc_id then
+            g.cur_scroll = 0
+            g.last_scroll_px = -1
+        end
+        g.last_corpse_id = npc_id
+        g.cursor_ready = false
+        g.cursor_settled = false
+    end
+    local grid = hcl_loot and hcl_loot.get_item_grid() or nil
+    local content_h = measure_grid_content_height(grid)
+    local vp_h = update_window_frame(g, main_x, content_h, grid and grid.max_cols or nil)
+    update_header_display(g, npc, main_x, hcl_loot and hcl_loot.is_corpse_looted() or false, false)
+    if entering then
+        g.badge_claimed:Show(false)
+        g.badge_empty:Show(false)
+        g.cc.prof:Show(true)
+        g.cc.scroll:Show(true)
+    end
+    rebuild_visual_grid(g, grid, npc_id, main_x, vp_h, content_h, false)
+    update_active_spinners(g)
+    update_cursor_and_scroll(g, dt)
+    if tg then
+        update_swipe_offset(g, tg)
+    end
+    update_footer_display(g, npc_id, main_x, true, false)
 end
 
--- @z_func: HCL_UI.actor_on_update [export:callback:actor_on_update] | states:HIDDEN,CLAIMED,EMPTY,PREVIEW,LOOTING
+-- @z_func: HCL_UI.on_option_change [export:callback:HIDDEN] | bind:hcl_ui_cui_rounded_hud_and_grid
+function on_option_change()
+    mcm_ui_dirty = true
+    if gui ~= nil then
+        gui.cache_frame_key = nil
+        gui.cache_header_key = nil
+        gui.cache_grid_key = nil
+        gui.cache_footer_key = nil
+        gui.cache_cursor_clr = nil
+        gui.cursor_settled = false
+    end
+end
+
+-- @z_func: HCL_UI.actor_on_net_destroy [export:callback:HIDDEN] | bind:hcl_ui_cui_rounded_hud_and_grid | states:HIDDEN
+function actor_on_net_destroy()
+    enter_ui_hidden()
+end
+
+-- @z_func: HCL_UI.actor_on_update [export:callback:HIDDEN] | bind:hcl_ui_header_identity_and_inventory_swipe | states:HIDDEN,CLAIMED,INVENTORY,EMPTY,PREVIEW,LOOTING
 function actor_on_update()
-    if not db.actor or not db.actor:alive() or not hcl_mcm.get_config("hcl_toggle") then
-        if hud_ui.is_shown or hud_ui.active_state ~= "HIDDEN" then
-            enter_ui_hidden()
-        end
+    local tg = time_global()
+    local dt = 0.016
+    if last_frame_tg > 0 and tg > last_frame_tg then
+        dt = math.min(0.1, math.max(0.001, (tg - last_frame_tg) / 1000.0))
+    end
+    last_frame_tg = tg
+
+    local corpse_status = (hcl_main and hcl_main.get_corpse_check_status()) or "INVALID"
+    local cb_status = (hcl_main and hcl_main.get_callback_status()) or "IDLE"
+    local corpse = (corpse_status == "VALID" and hcl_main) and hcl_main.get_hovered_corpse() or nil
+
+    if corpse_status ~= "VALID" or cb_status == "IDLE" or cb_status == "PENDING" or not corpse then
+        enter_ui_hidden()
         return
     end
 
-    local check_status = hcl_main.get_corpse_check_status()
-    local cb_status = hcl_main.get_callback_status()
-    local corpse = hcl_main.get_hovered_corpse()
-
-    if check_status == "INVALID" or not corpse then
-        if hud_ui.is_shown or hud_ui.active_state ~= "HIDDEN" then
-            enter_ui_hidden()
-        end
-        return
-    end
-
-    if check_status == "CLAIMED" then
+    if hcl_patch and hcl_patch.is_claimed() then
         enter_ui_claimed(corpse)
         return
     end
 
-    if cb_status == "IDLE" or cb_status == "PENDING" then
-        if hud_ui.is_shown or hud_ui.active_state ~= "HIDDEN" then
-            enter_ui_hidden()
+    local npc_id = corpse:id()
+    if cb_status == "LOOT" and hcl_loot and hcl_loot.is_inventory_mode() and hcl_loot.has_looted_items(npc_id) then
+        local inv_grid = hcl_loot.get_item_grid()
+        if inv_grid and #inv_grid > 0 then
+            enter_ui_inventory(corpse, dt, tg)
+            return
         end
+    end
+
+    local grid = hcl_loot and hcl_loot.get_item_grid() or nil
+    local grid_empty = (not grid) or (#grid == 0)
+    local lttr_holding_items = hcl_patch ~= nil
+        and hcl_patch.is_lttr_enabled()
+        and (hcl_patch.get_total_lootable_count(npc_id) > 0 or hcl_patch.is_searching(npc_id))
+
+    if grid_empty and (not lttr_holding_items) then
+        enter_ui_empty(corpse, tg)
         return
     end
 
-    local ltt_vis = drive_ltt_parse(corpse)
-    local items, raw_count, hidden_count, max_item_w, inv_hash = scan_corpse_inventory(corpse, ltt_vis)
-    if raw_count == 0 then
-        enter_ui_empty(corpse, cb_status)
-    elseif cb_status == "PREVIEW" then
-        enter_ui_preview(corpse, items, hidden_count, max_item_w, inv_hash)
+    if cb_status == "PREVIEW" then
+        enter_ui_preview(corpse)
+    elseif cb_status == "LOOT" then
+        enter_ui_looting(corpse, dt, tg)
     else
-        enter_ui_looting(corpse, items, hidden_count, max_item_w, inv_hash)
+        enter_ui_hidden()
     end
 end
 
--- @z_func: HCL_UI.actor_on_net_destroy [export:callback:actor_on_net_destroy] | bind:hcl_hud_dialog_and_layout
-function actor_on_net_destroy()
-    enter_ui_hidden()
-    hud_ui.dialog = nil
-end
-
--- @z_func: HCL_UI.on_option_change [export:callback:on_option_change]
-function on_option_change()
-    hud_ui.last_inv_hash = nil
-    if hud_ui.dialog then
-        apply_font_profile(hud_ui.dialog)
-    end
-end
-
--- @z_func: HCL_UI.on_game_start [export:callback:on_game_start]
+-- @z_func: HCL_UI.on_game_start [export:callback:HIDDEN] | bind:hcl_ui_cui_rounded_hud_and_grid
 function on_game_start()
-    install_uicellitem_area_hook()
-    RegisterScriptCallback("actor_on_update", actor_on_update)
-    RegisterScriptCallback("actor_on_net_destroy", actor_on_net_destroy)
     RegisterScriptCallback("on_option_change", on_option_change)
-    z_probe(2, "hcl_ui.on_game_start", "Registered HCL_UI callbacks")
+    RegisterScriptCallback("actor_on_net_destroy", actor_on_net_destroy)
+    RegisterScriptCallback("actor_on_update", actor_on_update)
 end

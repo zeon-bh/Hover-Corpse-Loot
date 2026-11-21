@@ -1,0 +1,17 @@
+<w>
+    <file name="ui\ui_hcl_v2_atlas">
+        <texture id="ui_hcl_v2_solid" x="12" y="12" width="16" height="16" />
+        <texture id="ui_hcl_v2_corner_tl" x="56" y="12" width="20" height="20" />
+        <texture id="ui_hcl_v2_corner_tr" x="96" y="12" width="20" height="20" />
+        <texture id="ui_hcl_v2_corner_bl" x="136" y="12" width="20" height="20" />
+        <texture id="ui_hcl_v2_corner_br" x="176" y="12" width="20" height="20" />
+        <texture id="ui_hcl_v2_header_grad_tl" x="216" y="12" width="20" height="20" />
+        <texture id="ui_hcl_v2_bg_top" x="8" y="48" width="496" height="12" />
+        <texture id="ui_hcl_v2_header_grad" x="8" y="80" width="496" height="64" />
+        <texture id="ui_hcl_v2_sep_fade" x="8" y="168" width="496" height="8" />
+        <texture id="ui_hcl_pill_looted" x="8" y="192" width="126" height="40" />
+        <texture id="ui_hcl_pill_claimed" x="150" y="192" width="138" height="40" />
+        <texture id="ui_hcl_pill_empty" x="304" y="192" width="116" height="40" />
+        <texture id="ui_hcl_v2_hdr_grad_rtl" x="8" y="264" width="496" height="64" />
+    </file>
+</w>
